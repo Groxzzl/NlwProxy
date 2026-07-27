@@ -114,6 +114,25 @@ $env:OPENAI_API_KEY = 'your-authorized-provider-key'
 $env:NLW_PROXY_LOCAL_TOKEN = 'generate-a-long-random-local-token'
 ```
 
+Console dashboard actions:
+
+- `R` refreshes the live frame; `C` copies connection details.
+- `N`, `E`, `W`, and `D` manage named provider profiles (new, edit, switch, delete). Deletion requires explicit confirmation.
+- `P` requests the optional, cached per-route exit-IP diagnostic; `M` masks/unmasks the local key; `L` shows metadata-log status; `H` shows help; `Q` drains and exits.
+- Live sections show profile/status/uptime, gateway details, provider-reported token usage, transparent model IDs, route transport/exit IP/latency/load, and recent metadata-only requests.
+
+Profile automation is also available without the console:
+
+```powershell
+.\\dist\\nlwproxy.exe profile list --config .\\nlwproxy.json
+.\\dist\\nlwproxy.exe profile create work --name "Work" --base-url https://api.example.com/v1 --api-key-env WORK_API_KEY --config .\\nlwproxy.json
+.\\dist\\nlwproxy.exe profile update work --name "Work Primary" --config .\\nlwproxy.json
+.\\dist\\nlwproxy.exe profile use work --config .\\nlwproxy.json
+.\\dist\\nlwproxy.exe profile delete work --config .\\nlwproxy.json
+```
+
+Each profile stores configuration and environment-variable names only. Secret values remain outside profile JSON. Multiple saved profiles require `console --profile <id>` until one is active; the selected profile is reused on later launches.
+
 ### Provider editing, testing, and model discovery
 
 Use the interactive console for routine changes. The equivalent non-interactive commands are:
@@ -161,6 +180,7 @@ nlwproxy config check [--config path]
 nlwproxy config path [--config path]
 nlwproxy config print-redacted [--config path]
 
+nlwproxy profile <list|show|create|update|delete|use> [--profiles-dir path] [--config path]
 nlwproxy proxy add <name> --base-url <https-url>
   [--proxy-url <http|https|socks5|socks5h://host:port>]
   [--api-key-env ENV] [--priority N] [--weight N]

@@ -33,5 +33,9 @@ $help = (& $exe --help 2>&1) -join "`n"
 if ($help -notmatch '(?m)^\s*nlwproxy console \[--config path\]') {
     throw "this binary does not expose 'nlwproxy console --config'. Rebuild after the console CLI integration lands"
 }
+if ($help -notmatch '(?m)^\s*nlwproxy profile ') { throw "this binary does not expose profile management" }
+
+$profileHelp = (& $exe profile 2>&1) -join "`n"
+if ($profileHelp -notmatch 'list\|show\|create\|update\|delete\|use') { throw "profile actions are incomplete" }
 
 Write-Host "PASS: config, dashboard, console command, and Windows launcher smoke checks passed."

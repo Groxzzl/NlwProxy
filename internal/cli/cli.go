@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"nlwproxy/internal/gateway"
 	"nlwproxy/internal/metrics"
 	"nlwproxy/internal/opencode"
+	"nlwproxy/internal/profiles"
 	"nlwproxy/internal/routing"
 	"nlwproxy/internal/transport"
 	"nlwproxy/internal/tui"
@@ -68,6 +70,8 @@ func Run(args []string, out, errOut io.Writer) int {
 		return runServe(args[1:], out, errOut)
 	case "console":
 		return runConsole(args[1:], out, errOut)
+	case "profile":
+		return runProfile(args[1:], out, errOut)
 	case "version", "--version":
 		fmt.Fprintln(out, version)
 		return 0
@@ -437,24 +441,141 @@ func runGateway(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
-func runConsole(args []string, out, errOut io.Writer) int {
-	fs := commandFlags("console", errOut)
-	path := fs.String("config", defaultConfigPath(), "configuration path")
+func runProfile(args []string, out, errOut io.Writer) int {
+	fs := commandFlags("profile", errOut)
+	dir := fs.String("dir", "profiles", "profiles directory")
 	if fs.Parse(args) != nil {
 		return 2
 	}
-	if _, err := os.Stat(*path); os.IsNotExist(err) {
+	store, err := profiles.Open(*dir)
+	if err != nil {
+		fmt.Fprintln(errOut, "profile:", err)
+		return 1
+	}
+	commandArgs := fs.Args()
+	if len(commandArgs) == 0 {
+		fmt.Fprintln(out, "usage: nlwproxy profile <list|show|create|update|delete|use|activate> [id]")
+		return 0
+	}
+	command := commandArgs[0]
+	switch command {
+	case "list":
+		entries, err := store.List()
+		if err != nil {
+			fmt.Fprintln(errOut, "profile:", err)
+			return 1
+		}
+		idx, _ := store.Index()
+		fmt.Fprintln(out, "ID\tNAME\tACTIVE\tAPI KEY ENV")
+		for _, entry := range entries {
+			fmt.Fprintf(out, "%s\t%s\t%t\t%s\n", entry.ID, entry.Name, entry.ID == idx.Active, entry.APIKeyEnv)
+		}
+		return 0
+	case "activate":
+		if len(commandArgs) < 2 {
+			fmt.Fprintln(errOut, "usage: nlwproxy profile activate <id>")
+			return 2
+		}
+		profile, err := store.Activate(commandArgs[1])
+		if err != nil {
+			fmt.Fprintln(errOut, "profile:", err)
+			return 1
+		}
+		fmt.Fprintln(out, "active profile:", profile.Name)
+		return 0
+	case "delete":
+		if len(commandArgs) < 2 {
+			fmt.Fprintln(errOut, "usage: nlwproxy profile delete <id>")
+			return 2
+		}
+		if err := store.Delete(commandArgs[1]); err != nil {
+			fmt.Fprintln(errOut, "profile:", err)
+			return 1
+		}
+		fmt.Fprintln(out, "deleted profile:", commandArgs[1])
+		return 0
+	default:
+		fmt.Fprintln(errOut, "usage: nlwproxy profile <list|show|create|update|delete|use|activate> [id]")
+		return 2
+	}
+}
+
+func runConsole(args []string, out, errOut io.Writer) int {
+	fs := commandFlags("console", errOut)
+	path := fs.String("config", defaultConfigPath(), "configuration path")
+	profilesDir := fs.String("profiles-dir", "profiles", "profiles directory")
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	store, err := profiles.Open(*profilesDir)
+	if err != nil {
+		fmt.Fprintln(errOut, "console profiles:", err)
+		return 1
+	}
+	selected, err := prepareConsoleProfile(store, *path)
+	if errors.Is(err, profiles.ErrSelectionRequired) {
+		entries, listErr := store.List()
+		if listErr != nil {
+			fmt.Fprintln(errOut, "console profiles:", listErr)
+			return 1
+		}
+		choices := make([]console.Profile, 0, len(entries))
+		entryIDs := make(map[string]string, len(entries))
+		for _, entry := range entries {
+			profile, getErr := store.Get(entry.ID)
+			if getErr != nil {
+				continue
+			}
+			detail := "configured"
+			if len(profile.Config.Upstreams) > 0 {
+				detail = profile.Config.Upstreams[0].BaseURL
+			}
+			choices = append(choices, console.Profile{Name: profile.Name, Detail: detail, Enabled: true})
+			entryIDs[profile.Name] = profile.ID
+		}
+		var chosenID string
+		selectorErr := console.RunProfileSelector(os.Stdin, os.Stdout, choices, console.SelectorHandlers{Select: func(choice console.Profile) error {
+			chosenID = entryIDs[choice.Name]
+			return nil
+		}})
+		if selectorErr != nil {
+			fmt.Fprintln(errOut, "console selector:", selectorErr)
+			return 1
+		}
+		if chosenID == "" {
+			return 0
+		}
+		selected, err = store.Activate(chosenID)
+	}
+	if errors.Is(err, profiles.ErrWizardRequired) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if _, err = (console.Wizard{In: os.Stdin, Out: out}).Run(ctx, *path); err != nil {
 			fmt.Fprintln(errOut, "console setup:", err)
 			return 1
 		}
+		if _, _, err = store.Migrate(*path); err != nil {
+			fmt.Fprintln(errOut, "console profiles:", err)
+			return 1
+		}
+		selected, err = store.Select()
 	}
-	cfg, err := config.Load(*path)
 	if err != nil {
-		fmt.Fprintln(errOut, "console:", err)
+		fmt.Fprintln(errOut, "console profiles:", err)
 		return 1
+	}
+	cfg := selected.Config
+	credentialNames := []string{cfg.Server.LocalTokenEnv}
+	for _, candidate := range cfg.Upstreams {
+		if candidate.Enabled {
+			credentialNames = append(credentialNames, candidate.APIKeyEnv)
+		}
+	}
+	for _, name := range credentialNames {
+		if _, credentialErr := loadCredential(name, registryCredentialSource{}); credentialErr != nil {
+			// A missing registry value is equivalent to a missing process variable.
+			continue
+		}
 	}
 	needsSetup := len(cfg.Upstreams) == 0 || cfg.Server.LocalTokenEnv == "" || os.Getenv(cfg.Server.LocalTokenEnv) == ""
 	if !needsSetup {
@@ -466,18 +587,8 @@ func runConsole(args []string, out, errOut io.Writer) int {
 		}
 	}
 	if needsSetup {
-		fmt.Fprintln(out, "Credentials belum tersedia. Membuka setup provider...")
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if _, err = (console.Wizard{In: os.Stdin, Out: out}).Run(ctx, *path); err != nil {
-			fmt.Fprintln(errOut, "console setup:", err)
-			return 1
-		}
-		cfg, err = config.Load(*path)
-		if err != nil {
-			fmt.Fprintln(errOut, "console:", err)
-			return 1
-		}
+		fmt.Fprintln(errOut, "console: required environment credentials are missing")
+		return 1
 	}
 	if len(cfg.Upstreams) == 0 {
 		fmt.Fprintln(errOut, "console: no provider configured")
@@ -491,17 +602,74 @@ func runConsole(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	events := metrics.NewEventBus(256)
-	base, _ := url.Parse(up.BaseURL)
-	rt, err := transport.New(transport.Config{Mode: transport.Direct, Timeout: 30 * time.Second})
-	if err != nil {
-		fmt.Fprintln(errOut, err)
+	targets := make([]routing.Target, 0, len(cfg.Upstreams))
+	var modelTransport http.RoundTripper
+	for _, route := range cfg.Upstreams {
+		if !route.Enabled {
+			continue
+		}
+		base, parseErr := url.Parse(route.BaseURL)
+		if parseErr != nil {
+			fmt.Fprintf(errOut, "console: route %s: %v\n", route.Name, parseErr)
+			return 1
+		}
+		mode := transport.Direct
+		if route.ProxyURL != "" {
+			proxyURL, proxyErr := url.Parse(route.ProxyURL)
+			if proxyErr != nil {
+				fmt.Fprintf(errOut, "console: route %s proxy: %v\n", route.Name, proxyErr)
+				return 1
+			}
+			if proxyURL.Scheme == "socks5" || proxyURL.Scheme == "socks5h" {
+				mode = transport.SOCKS5
+			} else {
+				mode = transport.HTTPProxy
+			}
+		}
+		rt, transportErr := transport.New(transport.Config{Mode: mode, ProxyURL: route.ProxyURL, Timeout: 30 * time.Second})
+		if transportErr != nil {
+			fmt.Fprintf(errOut, "console: route %s: %v\n", route.Name, transportErr)
+			return 1
+		}
+		key := ""
+		if route.APIKeyEnv != "" {
+			key = os.Getenv(route.APIKeyEnv)
+		}
+		wrapped := &upstreamTransport{base: base, apiKey: key, headers: route.Headers, next: rt}
+		if modelTransport == nil {
+			modelTransport = wrapped
+		}
+		targets = append(targets, routing.Target{Name: route.Name, Priority: route.Priority, Enabled: true, MaxConcurrency: 8, TransportType: string(mode), Transport: wrapped})
+	}
+	if len(targets) == 0 {
+		fmt.Fprintln(errOut, "console: no enabled routes")
 		return 1
 	}
-	selector := routing.New([]routing.Target{{Name: up.Name, Priority: up.Priority, Enabled: true, MaxConcurrency: 8, Transport: &upstreamTransport{base: base, apiKey: providerKey, headers: up.Headers, next: rt}}}, routing.Config{Strategy: routing.RoundRobin})
-	handler := gateway.New(gateway.Config{Token: localToken, MaxBodyBytes: cfg.Server.MaxBodyBytes, Attempts: 2, Events: events}, selector)
+	strategy := routing.Priority
+	if cfg.Routing.Strategy == "round_robin" {
+		strategy = routing.RoundRobin
+	}
+	selector := routing.New(targets, routing.Config{Strategy: strategy})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	modelService := &gateway.CachedModelService{Transport: modelTransport, TTL: 5 * time.Minute}
+	handler := gateway.New(gateway.Config{Token: localToken, MaxBodyBytes: cfg.Server.MaxBodyBytes, Attempts: 2, Events: events, Models: modelService}, selector)
+	modelCatalog := []console.CatalogModel{}
+	var modelCatalogMu sync.RWMutex
 	started := time.Now()
+	go func() {
+		catalogCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if models, discoverErr := modelService.Discover(catalogCtx); discoverErr == nil {
+			items := make([]console.CatalogModel, 0, len(models))
+			for _, model := range models {
+				items = append(items, console.CatalogModel{ID: model.ID, Name: model.Name})
+			}
+			modelCatalogMu.Lock()
+			modelCatalog = console.NormalizeCatalog(items)
+			modelCatalogMu.Unlock()
+		}
+	}()
 	gatewayCtx, cancelGateway := context.WithCancel(ctx)
 	defer cancelGateway()
 	serveErr := make(chan error, 1)
@@ -522,6 +690,9 @@ func runConsole(args []string, out, errOut io.Writer) int {
 		configuredRoutes = append(configuredRoutes, console.RouteStat{Name: route.Name, Transport: transportName, State: state})
 	}
 	makeView := func() console.DashboardView {
+		modelCatalogMu.RLock()
+		catalog := append([]console.CatalogModel(nil), modelCatalog...)
+		modelCatalogMu.RUnlock()
 		snap := events.Snapshot()
 		models, routes, input, output := console.AggregateMetadata(snap.Events, configuredRoutes)
 		status := "ONLINE"
@@ -535,7 +706,7 @@ func runConsole(args []string, out, errOut io.Writer) int {
 			}
 		default:
 		}
-		return console.DashboardView{Status: status, Started: started, BaseURL: "http://" + cfg.Server.Listen + "/v1", APIKey: localToken, ShowAPIKey: showKey, Provider: up.Name, ModelAlias: "opencode-route", Requests: snap.Total, Errors: snap.Errors, Active: snap.Active, InputTokens: input, OutputTokens: output, Models: models, Routes: routes, Recent: snap.Events, Message: message}
+		return console.DashboardView{Status: status, Started: started, BaseURL: "http://" + cfg.Server.Listen + "/v1", APIKey: localToken, ShowAPIKey: showKey, Provider: up.Name, ModelAlias: "transparent", Requests: snap.Total, Errors: snap.Errors, Active: snap.Active, InputTokens: input, OutputTokens: output, Models: models, AvailableModels: catalog, Routes: routes, Recent: snap.Events, Message: message}
 	}
 	controller := console.Controller{Cancel: cancelGateway, Handle: func(actionCtx context.Context, action console.Action) error {
 		switch action {
@@ -550,17 +721,52 @@ func runConsole(args []string, out, errOut io.Writer) int {
 				message = "Provider test passed."
 			}
 		case console.ActionSetup, console.ActionProvider:
-			_, err := (console.Wizard{In: os.Stdin, Out: out}).Run(actionCtx, *path)
-			if err != nil {
-				message = "Setup failed: " + err.Error()
+			settings, wizardErr := (console.Wizard{In: os.Stdin, Out: out}).Run(actionCtx, *path)
+			if wizardErr != nil {
+				message = "Setup failed: " + wizardErr.Error()
 			} else {
-				message = "Provider settings saved; restart to apply routing changes."
+				updated := selected
+				updated.Name = settings.Provider
+				updated.Config = console.BuildConfig(settings)
+				if _, updateErr := store.Update(selected.ID, updated); updateErr != nil {
+					message = "Profile update failed: " + updateErr.Error()
+				} else {
+					message = "Provider profile saved; restart to apply routing changes."
+				}
 			}
-		case console.ActionCopyURL:
-			if err := console.CopyClipboard("http://" + cfg.Server.Listen + "/v1"); err != nil {
+		case console.ActionConfig:
+			model := "MODEL_ID"
+			modelCatalogMu.RLock()
+			if len(modelCatalog) > 0 {
+				model = modelCatalog[0].ID
+			}
+			modelCatalogMu.RUnlock()
+			formats := console.TemplateFormats()
+			labels := make([]string, len(formats))
+			for i, format := range formats {
+				labels[i] = string(format)
+			}
+			selected, ok, selectErr := console.SelectFormat(os.Stdin, out, labels)
+			if selectErr != nil {
+				message = selectErr.Error()
+				break
+			}
+			if !ok {
+				message = "Configuration copy cancelled."
+				break
+			}
+			modelCatalogMu.RLock()
+			catalogCopy := append([]console.CatalogModel(nil), modelCatalog...)
+			modelCatalogMu.RUnlock()
+			text, renderErr := console.RenderConfigTemplate(formats[selected], console.TemplateData{Provider: up.Name, BaseURL: "http://" + cfg.Server.Listen + "/v1", APIKey: localToken, Model: model, Models: catalogCopy})
+			if renderErr != nil {
+				message = renderErr.Error()
+				break
+			}
+			if err := console.CopyClipboard(text); err != nil {
 				message = err.Error()
 			} else {
-				message = "Base URL copied."
+				message = string(formats[selected]) + " copied."
 			}
 		case console.ActionCopyKey:
 			if err := console.CopyClipboard(localToken); err != nil {
@@ -584,7 +790,10 @@ func runConsole(args []string, out, errOut io.Writer) int {
 		}
 		return nil
 	}}
-	if err := console.RunEventLoop(gatewayCtx, os.Stdin, out, time.Second, controller, func() string { return console.RenderDashboardV2(makeView(), true, 110) }); err != nil && !errors.Is(err, context.Canceled) {
+	if err := console.RunEventLoop(gatewayCtx, os.Stdin, out, time.Second, controller, func() string {
+		color := console.TerminalIsInteractive(os.Stdin, os.Stdout) && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+		return console.RenderDashboardV2(makeView(), color, console.TerminalWidth(os.Stdout))
+	}); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(errOut, "console:", err)
 		cancelGateway()
 		return 1
@@ -663,9 +872,15 @@ func runServe(args []string, out, errOut io.Writer) int {
 	probeTimeout, _ := time.ParseDuration(probe.Timeout)
 	probeTTL, _ := time.ParseDuration(probe.CacheTTL)
 	selector := routing.New(targets, routing.Config{Strategy: strategy, ExitIPProbe: routing.ExitIPProbeConfig{Enabled: probe.Enabled, URL: probe.URL, Timeout: probeTimeout, CacheTTL: probeTTL}})
-	handler := gateway.New(gateway.Config{Token: token, StrictOpenCode: cfg.Server.StrictOpenCodeClient, ModelAlias: "opencode-route", MaxBodyBytes: cfg.Server.MaxBodyBytes, Attempts: 2}, selector)
+	modelService := &gateway.CachedModelService{Transport: targets[0].Transport, TTL: 5 * time.Minute}
+	handler := gateway.New(gateway.Config{Token: token, StrictOpenCode: cfg.Server.StrictOpenCodeClient, MaxBodyBytes: cfg.Server.MaxBodyBytes, Attempts: 2, Models: modelService}, selector)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		catalogCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		_, _ = modelService.Discover(catalogCtx)
+	}()
 	fmt.Fprintln(out, "NLW Proxy listening on", cfg.Server.Listen)
 	if err := gateway.Serve(ctx, cfg.Server.Listen, handler, 15*time.Second); err != nil {
 		fmt.Fprintln(errOut, "serve:", err)
@@ -852,6 +1067,7 @@ Usage:
   nlwproxy setup [--opencode-config path] [--dry-run|--rollback] [--state-dir path]
   nlwproxy uninstall [--opencode-config path]
   nlwproxy console [--config path]
+  nlwproxy profile <list|create|update|activate|use|delete> [id] [--dir profiles]
   nlwproxy gateway [--config path]
   nlwproxy serve [--config path]
   nlwproxy status [--config path]

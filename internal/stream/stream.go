@@ -21,6 +21,7 @@ type Result struct {
 }
 
 const telemetryLimit = 1 << 20
+const telemetryTailLimit = 256 << 10
 
 type tokenUsage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
@@ -80,14 +81,27 @@ func Relay(ctx context.Context, w http.ResponseWriter, r io.Reader, started time
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
 	var captured bytes.Buffer
+	var tail []byte
 	ct := ""
 	if len(contentType) > 0 {
 		ct = contentType[0]
 	}
-	defer func() { parseTelemetry(&result, ct, captured.Bytes()) }()
+	defer func() {
+		telemetry := captured.Bytes()
+		if strings.Contains(strings.ToLower(ct), "text/event-stream") && len(tail) > 0 {
+			telemetry = tail
+		}
+		parseTelemetry(&result, ct, telemetry)
+	}()
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			if strings.Contains(strings.ToLower(ct), "text/event-stream") {
+				tail = append(tail, buf[:n]...)
+				if len(tail) > telemetryTailLimit {
+					tail = append([]byte(nil), tail[len(tail)-telemetryTailLimit:]...)
+				}
+			}
 			if captured.Len() < telemetryLimit {
 				remaining := telemetryLimit - captured.Len()
 				if n < remaining {

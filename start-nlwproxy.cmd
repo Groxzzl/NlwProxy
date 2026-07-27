@@ -5,6 +5,7 @@ pushd "%~dp0" >nul
 set "NLWPROXY_EXE=%~dp0dist\nlwproxy.exe"
 set "NLWPROXY_CONFIG=%~dp0nlwproxy.json"
 
+rem Existing active profiles are reused; first-run setup is not repeated.
 rem Route metrics are available from the local /health endpoint while serving.
 rem Optional exit-IP probes are configured in observability.exit_ip_probe,
 rem cached per route, and never run for each model request.

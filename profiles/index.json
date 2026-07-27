@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "active": "reffaunlimited",
+  "last_used": "reffaunlimited",
+  "profiles": [
+    {
+      "id": "reffaunlimited",
+      "name": "ReffaUnlimited",
+      "api_key_env": "REFFAUNLIMITED_API_KEY",
+      "updated_at": "2026-07-27T12:38:00.3024677Z"
+    }
+  ]
+}

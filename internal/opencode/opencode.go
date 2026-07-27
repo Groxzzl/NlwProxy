@@ -20,6 +20,9 @@ type Options struct {
 	Path     string
 	StateDir string
 	DryRun   bool
+	BaseURL  string
+	APIKey   string
+	Models   []string
 }
 
 type Result struct {
@@ -77,7 +80,7 @@ func Setup(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	patchRoot(root)
+	patchRoot(root, opts)
 	patched, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return Result{}, err
@@ -175,18 +178,34 @@ func readRoot(path string) ([]byte, map[string]any, error) {
 	return b, root, nil
 }
 
-func patchRoot(root map[string]any) {
+func patchRoot(root map[string]any, opts Options) {
 	providers, ok := root["provider"].(map[string]any)
 	if !ok {
 		providers = map[string]any{}
 		root["provider"] = providers
 	}
+	baseURL := opts.BaseURL
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:8787/v1"
+	}
+	apiKey := opts.APIKey
+	if apiKey == "" {
+		apiKey = "{env:NLW_PROXY_LOCAL_TOKEN}"
+	}
+	models := map[string]any{}
+	for _, id := range opts.Models {
+		if id != "" && id != "opencode-route" {
+			models[id] = map[string]any{"name": id}
+		}
+	}
 	providers[providerName] = map[string]any{
 		"npm": "@ai-sdk/openai-compatible", "name": "NLW Proxy",
-		"options": map[string]any{"baseURL": "http://127.0.0.1:8787/v1", "apiKey": "{env:NLW_PROXY_LOCAL_TOKEN}"},
-		"models":  map[string]any{"opencode-route": map[string]any{"name": "NLW Managed Route"}},
+		"options": map[string]any{"baseURL": baseURL, "apiKey": apiKey},
+		"models":  models,
 	}
-	root["model"] = "nlwproxy/opencode-route"
+	if len(opts.Models) > 0 && opts.Models[0] != "" && opts.Models[0] != "opencode-route" {
+		root["model"] = "nlwproxy/" + opts.Models[0]
+	}
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {

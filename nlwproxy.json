@@ -3,11 +3,17 @@
   "server": {
     "listen": "127.0.0.1:8787",
     "local_token_env": "NLW_PROXY_LOCAL_TOKEN",
-    "strict_opencode_client": true,
     "max_body_bytes": 20971520
   },
   "routing": {
     "strategy": "round_robin"
+  },
+  "observability": {
+    "exit_ip_probe": {
+      "url": "https://api.ipify.org?format=json",
+      "timeout": "3s",
+      "cache_ttl": "15m"
+    }
   },
   "upstreams": [
     {

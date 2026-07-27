@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -19,9 +20,14 @@ const (
 	ActionRefresh   Action = 'R'
 	ActionTest      Action = 'T'
 	ActionSetup     Action = 'S'
-	ActionCopyURL   Action = 'C'
+	ActionConfig    Action = 'C'
+	ActionCopyURL   Action = 'U'
 	ActionCopyKey   Action = 'B'
 	ActionCopyAll   Action = 'A'
+	ActionNew       Action = 'N'
+	ActionEdit      Action = 'E'
+	ActionSwitch    Action = 'W'
+	ActionDelete    Action = 'D'
 	ActionToggleKey Action = 'M'
 	ActionProvider  Action = 'P'
 	ActionLogs      Action = 'L'
@@ -33,6 +39,21 @@ type Controller struct {
 	Handle func(context.Context, Action) error
 }
 
+type TerminalCapabilities struct {
+	Interactive bool
+	Color       bool
+	Width       int
+}
+
+func TerminalIsInteractive(in, out *os.File) bool {
+	return isTerminalFile(in) && isTerminalFile(out)
+}
+
+func TerminalWidth(out *os.File) int {
+	width, _ := terminalSize(out)
+	return width
+}
+
 func (c Controller) Dispatch(ctx context.Context, key byte) (bool, error) {
 	key = byte(strings.ToUpper(string([]byte{key}))[0])
 	if key == 'Q' {
@@ -41,7 +62,7 @@ func (c Controller) Dispatch(ctx context.Context, key byte) (bool, error) {
 		}
 		return true, nil
 	}
-	if !strings.ContainsRune("RTSCBAMPLH", rune(key)) {
+	if !strings.ContainsRune("RTSCUBANEWPDMLH", rune(key)) {
 		return false, nil
 	}
 	if c.Handle == nil {
@@ -51,9 +72,32 @@ func (c Controller) Dispatch(ctx context.Context, key byte) (bool, error) {
 }
 
 func RunEventLoop(ctx context.Context, in io.Reader, out io.Writer, refresh time.Duration, ctl Controller, render func() string) error {
+	caps := TerminalCapabilities{}
+	inputFile, inputOK := in.(*os.File)
+	outputFile, outputOK := out.(*os.File)
+	if inputOK && outputOK && isTerminalFile(inputFile) && isTerminalFile(outputFile) && enableANSI(outputFile) {
+		caps.Interactive = true
+		caps.Color = os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+		caps.Width, _ = terminalSize(outputFile)
+		return withRawInput(inputFile, func(reader io.Reader) error {
+			return runEventLoop(ctx, reader, out, refresh, ctl, render, caps)
+		})
+	}
+	return runEventLoop(ctx, in, out, refresh, ctl, render, caps)
+}
+
+func runEventLoop(ctx context.Context, in io.Reader, out io.Writer, refresh time.Duration, ctl Controller, render func() string, caps TerminalCapabilities) error {
 	if refresh <= 0 {
 		refresh = time.Second
 	}
+	if !caps.Interactive {
+		_, err := io.WriteString(out, render())
+		return err
+	}
+	if _, err := io.WriteString(out, EnterScreen(true)); err != nil {
+		return err
+	}
+	defer io.WriteString(out, LeaveScreen(true))
 	keys := make(chan byte, 8)
 	errs := make(chan error, 1)
 	go func() {
@@ -69,7 +113,7 @@ func RunEventLoop(ctx context.Context, in io.Reader, out io.Writer, refresh time
 			}
 		}
 	}()
-	draw := func() error { _, err := io.WriteString(out, "\x1b[2J\x1b[H"+render()); return err }
+	draw := func() error { _, err := io.WriteString(out, ClearFrame(true)+render()); return err }
 	if err := draw(); err != nil {
 		return err
 	}
@@ -89,11 +133,11 @@ func RunEventLoop(ctx context.Context, in io.Reader, out io.Writer, refresh time
 					if dispatchErr != nil {
 						return dispatchErr
 					}
-					if drawErr := draw(); drawErr != nil {
-						return drawErr
-					}
 					if quit {
 						return nil
+					}
+					if drawErr := draw(); drawErr != nil {
+						return drawErr
 					}
 				}
 				return nil
@@ -108,11 +152,11 @@ func RunEventLoop(ctx context.Context, in io.Reader, out io.Writer, refresh time
 			if err != nil {
 				return err
 			}
-			if err := draw(); err != nil {
-				return err
-			}
 			if quit {
 				return nil
+			}
+			if err := draw(); err != nil {
+				return err
 			}
 		}
 	}
@@ -132,18 +176,20 @@ type ModelStat struct {
 	Requests, Errors, InputTokens, OutputTokens int64
 }
 type RouteStat struct {
-	Name, Transport, State   string
-	Requests, Errors, Active int64
-	Latency                  time.Duration
+	Name, Transport, State, ExitIP string
+	Requests, Errors, Active       int64
+	Latency                        time.Duration
+	Load                           int
 }
 type DashboardView struct {
-	Status, BaseURL, APIKey, Provider, ModelAlias, Message string
-	ShowAPIKey                                             bool
-	Started, Now                                           time.Time
-	Requests, Errors, Active, InputTokens, OutputTokens    int64
-	Models                                                 []ModelStat
-	Routes                                                 []RouteStat
-	Recent                                                 []metrics.Request
+	Profile, Status, BaseURL, APIKey, Provider, ModelAlias, Message string
+	ShowAPIKey                                                      bool
+	Started, Now                                                    time.Time
+	Requests, Errors, Active, InputTokens, OutputTokens             int64
+	Models                                                          []ModelStat
+	AvailableModels                                                 []CatalogModel
+	Routes                                                          []RouteStat
+	Recent                                                          []metrics.Request
 }
 
 func AggregateMetadata(events []metrics.Request, configured []RouteStat) ([]ModelStat, []RouteStat, int64, int64) {
@@ -155,8 +201,8 @@ func AggregateMetadata(events []metrics.Request, configured []RouteStat) ([]Mode
 	}
 	var input, output int64
 	for _, e := range events {
-		input += e.RequestBytes
-		output += e.ResponseBytes
+		input += e.InputTokens
+		output += e.OutputTokens
 		model := e.RequestedModel
 		if model == "" {
 			model = "—"
@@ -167,8 +213,8 @@ func AggregateMetadata(events []metrics.Request, configured []RouteStat) ([]Mode
 			models[model] = m
 		}
 		m.Requests++
-		m.InputTokens += e.RequestBytes
-		m.OutputTokens += e.ResponseBytes
+		m.InputTokens += e.InputTokens
+		m.OutputTokens += e.OutputTokens
 		route := e.RouteID
 		if route == "" {
 			route = "unassigned"
@@ -198,6 +244,12 @@ func AggregateMetadata(events []metrics.Request, configured []RouteStat) ([]Mode
 }
 
 func RenderDashboardV2(v DashboardView, color bool, width int) string {
+	paint := func(code, text string) string {
+		if !color {
+			return text
+		}
+		return code + text + themeReset
+	}
 	if width < 88 {
 		width = 88
 	}
@@ -230,13 +282,14 @@ func RenderDashboardV2(v DashboardView, color bool, width int) string {
 		fmt.Fprintf(&b, "├%s%s┤\n", label, strings.Repeat("─", width-2-len([]rune(label))))
 	}
 	fmt.Fprintf(&b, "┌%s┐\n", line)
-	row("NLWPROXY CONSOLE V2  /  LIVE GATEWAY CONTROL")
+	row(paint(themeBold+themePrimary, "NLWPROXY PREMIUM") + paint(themeMuted, "  /  LIVE GATEWAY CONTROL"))
 	fmt.Fprintf(&b, "├%s┤\n", line)
 	row(fmt.Sprintf("STATUS  ● %-10s  UPTIME %-10s  REQUESTS %-8d ERRORS %-6d ACTIVE %d", v.Status, uptime, v.Requests, v.Errors, v.Active))
-	row("BASE URL  " + v.BaseURL)
+	row("PROFILE   " + paint(themeAccent, v.Profile))
+	row("BASE URL  " + paint(themePrimary, v.BaseURL))
 	row("API KEY   " + key)
 	row("PROVIDER  " + v.Provider + "    MODEL ALIAS  " + v.ModelAlias)
-	section("TOKEN TOTALS (metadata bytes)")
+	section("TOKEN TOTALS")
 	row(fmt.Sprintf("INPUT  %s    OUTPUT  %s    TOTAL  %s", comma(v.InputTokens), comma(v.OutputTokens), comma(v.InputTokens+v.OutputTokens)))
 	section("PER-MODEL")
 	row("MODEL                         REQUESTS   ERRORS      INPUT     OUTPUT")
@@ -246,8 +299,15 @@ func RenderDashboardV2(v DashboardView, color bool, width int) string {
 	for _, m := range v.Models {
 		row(fmt.Sprintf("%-29s %8d %8d %10s %10s", m.Name, m.Requests, m.Errors, comma(m.InputTokens), comma(m.OutputTokens)))
 	}
+	section("AVAILABLE MODELS")
+	if len(v.AvailableModels) == 0 {
+		row("Catalog loading or unavailable. /v1/models remains transparent.")
+	}
+	for _, m := range v.AvailableModels {
+		row(fmt.Sprintf("%-48s %s", m.ID, m.Name))
+	}
 	section("ROUTES / PROXIES")
-	row("ROUTE                   TRANSPORT   STATE       REQUESTS ERRORS ACTIVE LATENCY")
+	row("ROUTE              TRANSPORT STATE       EXIT IP          LOAD REQUESTS ERRORS ACTIVE LATENCY")
 	if len(v.Routes) == 0 {
 		row("No routes configured.")
 	}
@@ -256,7 +316,11 @@ func RenderDashboardV2(v DashboardView, color bool, width int) string {
 		if r.Latency > 0 {
 			latency = r.Latency.Round(time.Millisecond).String()
 		}
-		row(fmt.Sprintf("%-23s %-11s %-11s %8d %6d %6d %s", r.Name, r.Transport, r.State, r.Requests, r.Errors, r.Active, latency))
+		exitIP := r.ExitIP
+		if exitIP == "" {
+			exitIP = "—"
+		}
+		row(fmt.Sprintf("%-18s %-9s %-11s %-16s %3d%% %8d %6d %6d %s", r.Name, r.Transport, r.State, exitIP, r.Load, r.Requests, r.Errors, r.Active, latency))
 	}
 	section("RECENT REQUESTS · METADATA ONLY")
 	row("TIME      ID       METHOD/ENDPOINT                    MODEL          ROUTE      STATUS DURATION")
@@ -268,8 +332,8 @@ func RenderDashboardV2(v DashboardView, color bool, width int) string {
 		row(fmt.Sprintf("%-9s %-8s %-34s %-14s %-10s %6d %s", e.StartedAt.Format("15:04:05"), e.RequestID, e.Endpoint, e.RequestedModel, e.RouteID, e.Status, e.Duration.Round(time.Millisecond)))
 	}
 	section("ACTIONS")
-	row("[R] Refresh  [T] Test  [S] Setup  [C] Copy URL  [B] Copy key  [A] Copy all")
-	row("[M] Mask key  [P] Provider  [L] Logs  [H] Help  [Q] Quit gracefully")
+	row("[R] Refresh  [C] Config templates  [N] New  [E] Edit  [W] Switch  [D] Delete")
+	row("[P] Probe exit IP  [M] Mask key  [L] Logs  [H] Help  [Q] Quit gracefully")
 	if v.Message != "" {
 		row("NOTICE  " + v.Message)
 	}

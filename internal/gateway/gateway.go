@@ -40,6 +40,7 @@ type Gateway struct {
 
 type Model struct {
 	ID      string `json:"id"`
+	Name    string `json:"name,omitempty"`
 	Object  string `json:"object,omitempty"`
 	OwnedBy string `json:"owned_by,omitempty"`
 	RouteID string `json:"route_id,omitempty"`
