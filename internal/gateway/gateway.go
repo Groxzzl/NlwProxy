@@ -76,7 +76,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "routes": g.selector.States(time.Now())})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "routes": g.selector.Snapshots(time.Now())})
 		return
 	}
 	if !g.authorized(r) {
@@ -203,6 +203,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 		resp, roundErr := target.Transport.RoundTrip(req)
 		if roundErr != nil {
 			release()
+			g.selector.RecordRequest(target.Name, routing.RequestResult{Latency: time.Since(start), UsedAt: time.Now()})
 			g.selector.RecordFailure(target.Name, time.Now())
 			if incoming.Context().Err() != nil {
 				return
@@ -217,13 +218,15 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 			g.selector.RecordFailure(target.Name, time.Now())
 			continue
 		}
-		g.selector.RecordSuccess(target.Name, time.Since(start))
+		latency := time.Since(start)
+		g.selector.RecordSuccess(target.Name, latency)
 		event.Status = resp.StatusCode
 		copyHeader(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		result := g.relay(incoming.Context(), w, resp.Body, started, resp.Header.Get("Content-Type"))
 		event.TTFT, event.ResponseBytes = result.TTFT, result.Bytes
 		event.InputTokens, event.OutputTokens, event.TotalTokens = result.InputTokens, result.OutputTokens, result.TotalTokens
+		g.selector.RecordRequest(target.Name, routing.RequestResult{Status: resp.StatusCode, Latency: latency, InputTokens: result.InputTokens, OutputTokens: result.OutputTokens, UsedAt: time.Now()})
 		if result.Err != nil && incoming.Context().Err() == nil {
 			event.ErrorCode = "stream_relay_failed"
 		}
