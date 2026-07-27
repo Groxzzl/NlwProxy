@@ -1,0 +1,5 @@
+nlwproxy
+nlwproxy.exe
+*.local.json
+*.local.yaml
+.nlwproxy-env.cmd

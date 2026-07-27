@@ -1,0 +1,27 @@
+# Documentation-only YAML equivalent. The current CLI reads strict JSON; use the JSON samples directly.
+client: opencode
+server:
+  listen: 127.0.0.1:8787
+routing:
+  strategy: failover
+upstreams:
+  - name: direct
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    priority: 10
+    weight: 100
+    enabled: true
+  - name: tor-local
+    base_url: https://api.openai.com/v1
+    proxy_url: socks5h://127.0.0.1:9050
+    api_key_env: OPENAI_API_KEY
+    priority: 40
+    weight: 10
+    enabled: false
+  - name: ssh-owned-host
+    base_url: https://api.openai.com/v1
+    proxy_url: socks5h://127.0.0.1:1080
+    api_key_env: OPENAI_API_KEY
+    priority: 30
+    weight: 10
+    enabled: false

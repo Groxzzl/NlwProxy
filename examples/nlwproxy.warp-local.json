@@ -1,0 +1,16 @@
+{
+  "client": "opencode",
+  "server": { "listen": "127.0.0.1:8787" },
+  "routing": { "strategy": "failover" },
+  "upstreams": [
+    {
+      "name": "warp-local",
+      "base_url": "https://api.openai.com/v1",
+      "proxy_url": "socks5h://127.0.0.1:40000",
+      "api_key_env": "OPENAI_API_KEY",
+      "priority": 20,
+      "weight": 20,
+      "enabled": false
+    }
+  ]
+}

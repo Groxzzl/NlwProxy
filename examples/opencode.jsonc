@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "nlwproxy": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NLW Proxy (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8787/v1",
+        "apiKey": "{env:NLW_PROXY_LOCAL_TOKEN}"
+      },
+      "models": {
+        "opencode-route": {
+          "name": "NLW Managed Route"
+        }
+      }
+    }
+  },
+  "model": "nlwproxy/opencode-route"
+}

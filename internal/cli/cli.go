@@ -649,7 +649,7 @@ func runServe(args []string, out, errOut io.Writer) int {
 				return 1
 			}
 		}
-		targets = append(targets, routing.Target{Name: up.Name, Priority: up.Priority, Enabled: true, MaxConcurrency: 8, Transport: &upstreamTransport{base: base, apiKey: apiKey, headers: up.Headers, next: roundTripper}})
+		targets = append(targets, routing.Target{Name: up.Name, Priority: up.Priority, Enabled: true, MaxConcurrency: 8, TransportType: string(mode), Transport: &upstreamTransport{base: base, apiKey: apiKey, headers: up.Headers, next: roundTripper}})
 	}
 	if len(targets) == 0 {
 		fmt.Fprintln(errOut, "serve: no enabled upstream routes")
@@ -659,7 +659,10 @@ func runServe(args []string, out, errOut io.Writer) int {
 	if cfg.Routing.Strategy == "round_robin" {
 		strategy = routing.RoundRobin
 	}
-	selector := routing.New(targets, routing.Config{Strategy: strategy})
+	probe := cfg.Observability.ExitIPProbe
+	probeTimeout, _ := time.ParseDuration(probe.Timeout)
+	probeTTL, _ := time.ParseDuration(probe.CacheTTL)
+	selector := routing.New(targets, routing.Config{Strategy: strategy, ExitIPProbe: routing.ExitIPProbeConfig{Enabled: probe.Enabled, URL: probe.URL, Timeout: probeTimeout, CacheTTL: probeTTL}})
 	handler := gateway.New(gateway.Config{Token: token, StrictOpenCode: cfg.Server.StrictOpenCodeClient, ModelAlias: "opencode-route", MaxBodyBytes: cfg.Server.MaxBodyBytes, Attempts: 2}, selector)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

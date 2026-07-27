@@ -1,0 +1,16 @@
+{
+  "client": "opencode",
+  "server": { "listen": "127.0.0.1:8787" },
+  "routing": { "strategy": "failover" },
+  "upstreams": [
+    {
+      "name": "tor-local",
+      "base_url": "https://api.openai.com/v1",
+      "proxy_url": "socks5h://127.0.0.1:9050",
+      "api_key_env": "OPENAI_API_KEY",
+      "priority": 40,
+      "weight": 10,
+      "enabled": false
+    }
+  ]
+}
