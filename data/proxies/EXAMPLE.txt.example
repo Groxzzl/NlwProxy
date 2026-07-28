@@ -1,0 +1,19 @@
+# NLW Proxy — example proxy list
+#
+# Copy this file to `webshare-01.txt` (or any *.txt name) inside data/proxies/
+# and replace with your real proxies. NLW Proxy auto-loads every *.txt file in
+# this folder on startup, deduplicates by host:port, then health-tests them.
+#
+# Supported formats (one proxy per line):
+#   host:port
+#   host:port:username:password        (authenticated — recommended)
+#   http://host:port
+#   http://username:password@host:port
+#   socks5://host:port
+#
+# Lines starting with # and blank lines are ignored.
+#
+# Example (these are NOT real, replace them):
+# 203.0.113.10:8080:user1:pass1
+# 203.0.113.11:8080:user1:pass1
+# socks5://198.51.100.5:1080

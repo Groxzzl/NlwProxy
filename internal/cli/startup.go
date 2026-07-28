@@ -3,11 +3,36 @@ package cli
 import (
 	"os"
 
+	"nlwproxy/internal/config"
+	"nlwproxy/internal/console"
 	"nlwproxy/internal/profiles"
 )
 
 type credentialSource interface {
 	Lookup(string) (string, error)
+}
+
+type credentialStore interface {
+	credentialSource
+	Set(string, string) error
+}
+
+func createOnboardingProfile(store *profiles.Store, result console.OnboardingResult, secrets credentialStore) (profiles.Profile, error) {
+	s := result.Settings
+	values := map[string]string{s.APIKeyEnv: s.ProviderAPIKey, s.GatewayAPIKeyEnv: s.GatewayAPIKey, s.BaseURLEnv: s.BaseURL, s.DefaultModelEnv: s.DefaultModel}
+	for _, name := range []string{s.APIKeyEnv, s.GatewayAPIKeyEnv, s.BaseURLEnv, s.DefaultModelEnv} {
+		if err := secrets.Set(name, values[name]); err != nil {
+			return profiles.Profile{}, err
+		}
+		if err := os.Setenv(name, values[name]); err != nil {
+			return profiles.Profile{}, err
+		}
+	}
+	cfg := config.Default()
+	cfg.DefaultModel = s.DefaultModel
+	cfg.Server.LocalTokenEnv = s.GatewayAPIKeyEnv
+	cfg.Upstreams = []config.Upstream{{Name: s.Provider, BaseURL: s.BaseURL, APIKeyEnv: s.APIKeyEnv, Priority: 10, Weight: 1, Enabled: true}}
+	return store.Create(profiles.Profile{ID: result.ProfileID, Name: s.Provider, Config: cfg})
 }
 
 func loadCredential(name string, source credentialSource) (string, error) {

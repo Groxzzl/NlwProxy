@@ -8,6 +8,7 @@
   "routing": {
     "strategy": "round_robin"
   },
+  "proxy_only": true,
   "observability": {
     "exit_ip_probe": {
       "url": "https://api.ipify.org?format=json",
@@ -18,7 +19,7 @@
   "upstreams": [
     {
       "name": "ReffaUnlimited",
-      "base_url": "https://api.opencode.ai/v1",
+      "base_url": "https://opencode.ai/zen/v1",
       "api_key_env": "REFFAUNLIMITED_API_KEY",
       "priority": 10,
       "weight": 1,

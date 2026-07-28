@@ -205,7 +205,7 @@ func TestRetriesNetworkAnd503ButNeverAuthRateLimitOrQuota(t *testing.T) {
 		body      string
 		wantCalls int
 	}{
-		{"transient", 503, `temporary`, 2}, {"auth", 401, `bad key`, 1}, {"forbidden", 403, `denied`, 1}, {"rate", 429, `rate limit`, 1}, {"quota", 400, `{"error":{"code":"insufficient_quota"}}`, 1},
+		{"transient", 503, `temporary`, 2}, {"auth", 401, `bad key`, 1}, {"forbidden", 403, `denied`, 1}, {"rate", 429, `rate limit`, 2}, {"quota", 400, `{"error":{"code":"insufficient_quota"}}`, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,8 +422,75 @@ func TestActiveSnapshotIncludesInFlightStream(t *testing.T) {
 	}
 }
 
-func TestGatewayRecordsPerRouteTokensAndDoesNotFailOverAuthOrRateLimit(t *testing.T) {
-	for _, status := range []int{401, 403, 429} {
+func TestActiveEventPublishesStartStreamingAndCompletedStates(t *testing.T) {
+	bus := metrics.NewEventBus(8)
+	releaseResponse := make(chan struct{})
+	firstChunk := make(chan struct{})
+	release := make(chan struct{})
+	g := New(Config{Token: "local-secret", Events: bus}, routing.NewSelector([]routing.Target{{Name: "stream", Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-releaseResponse
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = io.WriteString(pw, "data: one\n\n")
+			close(firstChunk)
+			<-release
+			_, _ = io.WriteString(pw, "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\n")
+			_ = pw.Close()
+		}()
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr, Request: r}, nil
+	})}}, routing.BreakerConfig{}))
+	done := make(chan struct{})
+	go func() {
+		g.ServeHTTP(newFlushRecorder(), authorized(http.MethodPost, "/v1/chat/completions", `{"model":"stream-model","stream":true,"messages":[{"content":"private"}]}`))
+		close(done)
+	}()
+
+	start := waitForRequestState(t, bus, metrics.RequestActive)
+	if start.RouteID != "stream" || start.RequestedModel != "stream-model" || start.Status != 0 {
+		t.Fatalf("active event=%+v", start)
+	}
+	close(releaseResponse)
+	<-firstChunk
+	streaming := waitForRequestState(t, bus, metrics.RequestStreaming)
+	if streaming.TTFT <= 0 || streaming.RouteID != "stream" {
+		t.Fatalf("streaming event=%+v", streaming)
+	}
+	close(release)
+	<-done
+	completed := waitForRequestState(t, bus, metrics.RequestCompleted)
+	if completed.Status != 200 || completed.InputTokens != 3 || completed.OutputTokens != 5 || completed.TotalTokens != 8 || completed.Duration < completed.TTFT {
+		t.Fatalf("completed event=%+v", completed)
+	}
+	if snapshot := bus.Snapshot(); snapshot.Total != 1 || snapshot.Active != 0 || len(snapshot.Events) != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	data, _ := json.Marshal(bus.Snapshot())
+	if strings.Contains(string(data), "private") {
+		t.Fatalf("content leaked: %s", data)
+	}
+}
+
+func waitForRequestState(t *testing.T, bus *metrics.EventBus, state metrics.RequestState) metrics.Request {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		snapshot := bus.Snapshot()
+		for _, event := range snapshot.Events {
+			if event.State == state {
+				return event
+			}
+		}
+		_, changed := bus.Changes()
+		select {
+		case <-changed:
+		case <-deadline:
+			t.Fatalf("state %q not published; snapshot=%+v", state, snapshot)
+		}
+	}
+}
+
+func TestGatewayRecordsPerRouteTokensAndDoesNotFailOverAuth(t *testing.T) {
+	for _, status := range []int{401, 403} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			var secondCalls atomic.Int32
 			first := roundTripFunc(func(r *http.Request) (*http.Response, error) {

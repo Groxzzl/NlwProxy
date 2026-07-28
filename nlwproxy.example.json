@@ -1,0 +1,29 @@
+{
+  "client": "opencode",
+  "server": {
+    "listen": "127.0.0.1:8787",
+    "local_token_env": "NLW_PROXY_LOCAL_TOKEN",
+    "max_body_bytes": 20971520
+  },
+  "routing": {
+    "strategy": "round_robin"
+  },
+  "proxy_only": true,
+  "observability": {
+    "exit_ip_probe": {
+      "url": "https://api.ipify.org?format=json",
+      "timeout": "3s",
+      "cache_ttl": "15m"
+    }
+  },
+  "upstreams": [
+    {
+      "name": "MyProvider",
+      "base_url": "https://opencode.ai/zen/v1",
+      "api_key_env": "MYPROVIDER_API_KEY",
+      "priority": 10,
+      "weight": 1,
+      "enabled": true
+    }
+  ]
+}

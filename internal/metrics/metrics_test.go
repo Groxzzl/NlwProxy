@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,6 +40,47 @@ func TestEventBusTracksActiveRequestsAndNeverSerializesContent(t *testing.T) {
 	}
 	if strings.Contains(string(data), "TOP SECRET") || strings.Contains(string(data), "PRIVATE") {
 		t.Fatalf("content leaked: %s", data)
+	}
+}
+
+func TestEventBusRevisionAndChangesUnderConcurrency(t *testing.T) {
+	bus := NewEventBus(32)
+	initial, changed := bus.Changes()
+	const workers = 16
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bus.Start()
+			bus.Publish(Request{Endpoint: "/v1/responses", RequestedModel: "model", Prompt: "private", Response: "private"})
+		}()
+	}
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("metadata change was not signaled")
+	}
+	wg.Wait()
+	snapshot := bus.Snapshot()
+	if snapshot.Revision != initial+workers*2 || snapshot.Total != workers || snapshot.Active != 0 {
+		t.Fatalf("snapshot=%+v initial revision=%d", snapshot, initial)
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "private") {
+		t.Fatalf("content leaked: %s", data)
+	}
+	current, next := bus.Changes()
+	if current != snapshot.Revision {
+		t.Fatalf("changes revision=%d snapshot revision=%d", current, snapshot.Revision)
+	}
+	select {
+	case <-next:
+		t.Fatal("new change channel was already closed")
+	default:
 	}
 }
 

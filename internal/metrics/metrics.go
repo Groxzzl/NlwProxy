@@ -14,6 +14,14 @@ import (
 	"time"
 )
 
+type RequestState string
+
+const (
+	RequestActive    RequestState = "active"
+	RequestStreaming RequestState = "streaming"
+	RequestCompleted RequestState = "completed"
+)
+
 type Request struct {
 	RequestID      string        `json:"request_id"`
 	SessionHash    string        `json:"session_hash,omitempty"`
@@ -31,15 +39,17 @@ type Request struct {
 	ResponseBytes  int64         `json:"response_bytes,omitempty"`
 	RetryCount     int           `json:"retry_count,omitempty"`
 	ErrorCode      string        `json:"error_code,omitempty"`
+	State          RequestState  `json:"state"`
 	Prompt         string        `json:"-"`
 	Response       string        `json:"-"`
 }
 
 type Snapshot struct {
-	Events []Request `json:"events"`
-	Total  int64     `json:"total"`
-	Errors int64     `json:"errors"`
-	Active int64     `json:"active"`
+	Events   []Request `json:"events"`
+	Total    int64     `json:"total"`
+	Errors   int64     `json:"errors"`
+	Active   int64     `json:"active"`
+	Revision uint64    `json:"revision"`
 }
 
 // EventBus is a bounded, concurrency-safe live metadata feed.
@@ -48,37 +58,47 @@ type EventBus struct {
 	capacity              int
 	events                []Request
 	total, errors, active int64
+	revision              uint64
+	changed               chan struct{}
 }
 
 func NewEventBus(capacity int) *EventBus {
 	if capacity <= 0 {
 		capacity = 256
 	}
-	return &EventBus{capacity: capacity, events: make([]Request, 0, capacity)}
+	return &EventBus{capacity: capacity, events: make([]Request, 0, capacity), changed: make(chan struct{})}
 }
 
-func (b *EventBus) Start() {
+func (b *EventBus) signalLocked() {
+	b.revision++
+	close(b.changed)
+	b.changed = make(chan struct{})
+}
+
+func (b *EventBus) Start(events ...Request) {
 	if b == nil {
 		return
 	}
 	b.mu.Lock()
 	b.active++
+	if len(events) > 0 {
+		b.upsertLocked(sanitize(events[0], RequestActive))
+	}
+	b.signalLocked()
 	b.mu.Unlock()
 }
 
-func (b *EventBus) Publish(event Request) {
-	if b == nil {
-		return
-	}
-	event.Prompt, event.Response = "", ""
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.total++
-	if event.Status >= 400 || event.ErrorCode != "" {
-		b.errors++
-	}
-	if b.active > 0 {
-		b.active--
+func sanitize(event Request, state RequestState) Request {
+	event.Prompt, event.Response, event.State = "", "", state
+	return event
+}
+
+func (b *EventBus) upsertLocked(event Request) {
+	for i := range b.events {
+		if event.RequestID != "" && b.events[i].RequestID == event.RequestID {
+			b.events[i] = event
+			return
+		}
 	}
 	if len(b.events) == b.capacity {
 		copy(b.events, b.events[1:])
@@ -88,13 +108,53 @@ func (b *EventBus) Publish(event Request) {
 	}
 }
 
+func (b *EventBus) Update(event Request) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.upsertLocked(sanitize(event, event.State))
+	b.signalLocked()
+}
+
+func (b *EventBus) Publish(event Request) {
+	if b == nil {
+		return
+	}
+	event = sanitize(event, RequestCompleted)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.total++
+	if event.Status >= 400 || event.ErrorCode != "" {
+		b.errors++
+	}
+	if b.active > 0 {
+		b.active--
+	}
+	b.upsertLocked(event)
+	b.signalLocked()
+}
+
 func (b *EventBus) Snapshot() Snapshot {
 	if b == nil {
 		return Snapshot{Events: []Request{}}
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return Snapshot{Events: append([]Request(nil), b.events...), Total: b.total, Errors: b.errors, Active: b.active}
+	return Snapshot{Events: append([]Request(nil), b.events...), Total: b.total, Errors: b.errors, Active: b.active, Revision: b.revision}
+}
+
+// Changes returns the current metadata revision and a channel closed by the
+// next change. Callers re-read Changes after waking to coalesce any burst of
+// request metadata updates into a single redraw.
+func (b *EventBus) Changes() (uint64, <-chan struct{}) {
+	if b == nil {
+		return 0, nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.revision, b.changed
 }
 
 type JSONLStore struct {

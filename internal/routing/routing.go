@@ -74,6 +74,7 @@ type State struct {
 	Failures          int           `json:"failures"`
 	Active            int           `json:"active"`
 	OpenUntil         time.Time     `json:"open_until,omitempty"`
+	CooldownUntil     time.Time     `json:"cooldown_until,omitempty"`
 	ProbeActive       bool          `json:"-"`
 	RecoverySuccesses int           `json:"-"`
 }
@@ -98,6 +99,7 @@ type RouteSnapshot struct {
 	InputTokens           int64         `json:"input_tokens"`
 	OutputTokens          int64         `json:"output_tokens"`
 	LastUsed              time.Time     `json:"last_used,omitempty"`
+	CooldownUntil         time.Time     `json:"cooldown_until,omitempty"`
 	ExitIP                ExitIP        `json:"exit_ip,omitempty"`
 }
 type entry struct {
@@ -156,6 +158,36 @@ func New(targets []Target, cfg Config) *Selector {
 	}
 	return s
 }
+
+// Reload atomically replaces routes while preserving state for retained names.
+func (s *Selector) Reload(targets []Target) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]*entry, len(targets))
+	for _, target := range targets {
+		if current := s.entries[target.Name]; current != nil {
+			current.target = target
+			if target.TransportType != "" {
+				current.metrics.Transport = target.TransportType
+			}
+			next[target.Name] = current
+			continue
+		}
+		kind := target.TransportType
+		if kind == "" {
+			kind = "direct"
+		}
+		state := State{Health: Unknown, Circuit: CircuitClosed, Latency: target.Latency}
+		next[target.Name] = &entry{target: target, state: state, metrics: RouteSnapshot{Health: Unknown, Circuit: CircuitClosed, Transport: kind, Latency: target.Latency}}
+	}
+	s.entries = next
+	s.rr = 0
+	for session, sticky := range s.sticky {
+		if next[sticky.name] == nil {
+			delete(s.sticky, session)
+		}
+	}
+}
 func (s *Selector) Next(now time.Time, exclude map[string]bool) (Target, bool) {
 	return s.next(now, exclude, "")
 }
@@ -166,6 +198,9 @@ func (s *Selector) next(now time.Time, exclude map[string]bool, session string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	eligible := func(e *entry) bool {
+		if now.Before(e.state.CooldownUntil) {
+			return false
+		}
 		return !exclude[e.target.Name] && e.state.Health != Unhealthy && (e.target.MaxConcurrency <= 0 || e.state.Active < e.target.MaxConcurrency)
 	}
 	if session != "" {
@@ -214,7 +249,7 @@ func (s *Selector) next(now time.Time, exclude map[string]bool, session string) 
 			if a.target.Priority != b.target.Priority {
 				return a.target.Priority < b.target.Priority
 			}
-			if a.state.Latency != b.state.Latency {
+			if s.cfg.Strategy != RoundRobin && a.state.Latency != b.state.Latency {
 				return a.state.Latency < b.state.Latency
 			}
 		}
@@ -252,6 +287,37 @@ func (s *Selector) SetHealth(name string, h Health, latency time.Duration) {
 			e.state.Latency = latency
 		}
 	}
+}
+
+// SetCooldown marks a route as rate-limited until now+d. While cooled down the
+// selector will skip it, so a 429'd proxy is not retried until its quota resets.
+func (s *Selector) SetCooldown(name string, now time.Time, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.entries[name]; e != nil {
+		e.state.CooldownUntil = now.Add(d)
+		e.metrics.CooldownUntil = e.state.CooldownUntil
+	}
+}
+
+// SoonestRecovery returns the earliest time any cooled-down route becomes
+// available again, or zero if none are in cooldown. Used to tell the client
+// when to retry when every proxy is rate-limited.
+func (s *Selector) SoonestRecovery(now time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var soonest time.Time
+	for _, e := range s.entries {
+		if now.Before(e.state.CooldownUntil) {
+			if soonest.IsZero() || e.state.CooldownUntil.Before(soonest) {
+				soonest = e.state.CooldownUntil
+			}
+		}
+	}
+	return soonest
 }
 func (s *Selector) RecordSuccess(name string, latency time.Duration) {
 	s.mu.Lock()
@@ -335,6 +401,7 @@ func (s *Selector) Snapshots(now time.Time) map[string]RouteSnapshot {
 	for n, e := range s.entries {
 		m := e.metrics
 		m.Health, m.Circuit = e.state.Health, e.state.Circuit
+		m.CooldownUntil = e.state.CooldownUntil
 		if m.Circuit == CircuitOpen && !now.Before(e.state.OpenUntil) {
 			m.Circuit = CircuitHalfOpen
 		}

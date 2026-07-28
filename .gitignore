@@ -1,5 +1,31 @@
+# Build artifacts
 nlwproxy
 nlwproxy.exe
+nlwproxy.exe~
+/dist/
+*.exe
+*.exe~
+
+# Secrets and local runtime data (NEVER commit)
+# Proxy lists contain host:port:user:pass credentials
+/data/proxies/*.txt
+/data/proxies/*.json
+/data/*.json
+!/data/proxies/EXAMPLE.txt.example
+
+# Local env launchers with literal API keys / tokens
+.nlwproxy-env.cmd
 *.local.json
 *.local.yaml
-.nlwproxy-env.cmd
+*.local.cmd
+
+# Saved runtime profiles may reference credential env names, keep local
+/profiles/*.json
+!/profiles/index.example.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

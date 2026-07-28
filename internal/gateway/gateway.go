@@ -30,6 +30,7 @@ type Config struct {
 	Attempts       int
 	Events         *metrics.EventBus
 	Models         ModelService
+	NoRouteCode    string
 }
 
 type Gateway struct {
@@ -167,7 +168,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 	_ = json.Unmarshal(body, &envelope)
 	event.RequestedModel = envelope.Model
 	if g.cfg.Events != nil {
-		g.cfg.Events.Start()
+		g.cfg.Events.Start(event)
 		defer func() {
 			event.Duration = time.Since(started)
 			if event.Duration <= 0 {
@@ -180,12 +181,26 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 	for attempt := 0; attempt < g.cfg.Attempts; attempt++ {
 		target, ok := g.selector.NextSession(time.Now(), exclude, incoming.Header.Get("X-OpenCode-Session"))
 		if !ok {
-			event.Status, event.ErrorCode, event.RetryCount = http.StatusServiceUnavailable, "NLP-UP-001", attempt
-			writeError(w, http.StatusServiceUnavailable, "NLP-UP-001", "no eligible upstream route")
+			code, message := g.cfg.NoRouteCode, "no eligible upstream route"
+			if code == "" {
+				code = "NLP-UP-001"
+			} else {
+				message = "no healthy proxy route"
+				if soonest := g.selector.SoonestRecovery(time.Now()); !soonest.IsZero() {
+					wait := time.Until(soonest).Round(time.Second)
+					message = fmt.Sprintf("all proxies rate-limited; soonest recovery in %s", wait)
+				}
+			}
+			event.Status, event.ErrorCode, event.RetryCount = http.StatusServiceUnavailable, code, attempt
+			writeError(w, http.StatusServiceUnavailable, code, message)
 			return
 		}
 		exclude[target.Name] = true
 		event.RouteID, event.RetryCount = target.Name, attempt
+		if g.cfg.Events != nil {
+			event.State = metrics.RequestActive
+			g.cfg.Events.Update(event)
+		}
 		if target.Transport == nil {
 			g.selector.RecordFailure(target.Name, time.Now())
 			continue
@@ -212,6 +227,19 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 			continue
 		}
 		decision := retry.Classify(resp.StatusCode, nil, nil, false)
+		var rlBody []byte
+		if resp.StatusCode == 429 || resp.StatusCode == 400 {
+			rlBody, _ = io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			decision = retry.Classify(resp.StatusCode, rlBody, nil, false)
+			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(rlBody), resp.Body))
+		}
+		if decision.Reason == "rate_limit" || decision.Reason == "quota" {
+			cd := retry.ParseRetryAfter(resp.Header.Get("Retry-After"), rlBody, time.Now())
+			if cd <= 0 {
+				cd = 15 * time.Minute // conservative default when provider gives no hint
+			}
+			g.selector.SetCooldown(target.Name, time.Now(), cd)
+		}
 		if decision.Retry && attempt+1 < g.cfg.Attempts {
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
@@ -224,7 +252,16 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 		event.Status = resp.StatusCode
 		copyHeader(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		result := g.relay(incoming.Context(), w, resp.Body, started, resp.Header.Get("Content-Type"))
+		result := g.relay(incoming.Context(), w, resp.Body, started, resp.Header.Get("Content-Type"), func(ttft time.Duration) {
+			event.TTFT = ttft
+			if event.TTFT <= 0 {
+				event.TTFT = time.Nanosecond
+			}
+			event.State = metrics.RequestStreaming
+			if g.cfg.Events != nil {
+				g.cfg.Events.Update(event)
+			}
+		})
 		event.TTFT, event.ResponseBytes = result.TTFT, result.Bytes
 		event.InputTokens, event.OutputTokens, event.TotalTokens = result.InputTokens, result.OutputTokens, result.TotalTokens
 		g.selector.RecordRequest(target.Name, routing.RequestResult{Status: resp.StatusCode, Latency: latency, InputTokens: result.InputTokens, OutputTokens: result.OutputTokens, UsedAt: time.Now()})
@@ -238,9 +275,9 @@ func (g *Gateway) proxy(w http.ResponseWriter, incoming *http.Request) {
 	writeError(w, http.StatusBadGateway, "NLP-UP-001", "upstream connection failed")
 }
 
-func (g *Gateway) relay(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, started time.Time, contentType string) stream.Result {
+func (g *Gateway) relay(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, started time.Time, contentType string, firstByte func(time.Duration)) stream.Result {
 	defer body.Close()
-	return stream.Relay(ctx, w, body, started, contentType)
+	return stream.RelayObserved(ctx, w, body, started, firstByte, contentType)
 }
 
 var errBodyTooLarge = errors.New("body too large")

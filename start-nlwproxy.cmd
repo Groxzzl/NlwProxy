@@ -26,7 +26,7 @@ if not exist "%NLWPROXY_CONFIG%" (
   exit /b 1
 )
 
-"%NLWPROXY_EXE%" console --config "%NLWPROXY_CONFIG%"
+"%NLWPROXY_EXE%" tui --config "%NLWPROXY_CONFIG%" --profiles-dir "%~dp0profiles"
 set "NLWPROXY_EXIT=%ERRORLEVEL%"
 popd >nul
 exit /b %NLWPROXY_EXIT%

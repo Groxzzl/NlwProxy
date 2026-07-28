@@ -80,7 +80,10 @@ func enableANSI(file *os.File) bool {
 	if !ok {
 		return false
 	}
-	mode |= enableVirtualTerminalProcess | disableNewlineAutoReturn
+	mode |= enableVirtualTerminalProcess
+	// Keep normal CR/LF semantics. DISABLE_NEWLINE_AUTO_RETURN causes LF to
+	// preserve the current column in some Windows hosts, producing diagonal UI.
+	mode &^= disableNewlineAutoReturn
 	r, _, _ := procSetConsoleMode.Call(file.Fd(), uintptr(mode))
 	return r != 0
 }

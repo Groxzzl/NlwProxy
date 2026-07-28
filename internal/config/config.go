@@ -14,10 +14,12 @@ import (
 
 type Config struct {
 	Client        string        `json:"client"`
+	DefaultModel  string        `json:"default_model,omitempty"`
 	Server        Server        `json:"server"`
 	Routing       Routing       `json:"routing"`
 	Observability Observability `json:"observability,omitempty"`
 	Upstreams     []Upstream    `json:"upstreams"`
+	ProxyOnly     bool          `json:"proxy_only,omitempty"`
 }
 
 type Observability struct {

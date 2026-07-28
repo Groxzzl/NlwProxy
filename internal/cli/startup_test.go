@@ -4,15 +4,42 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nlwproxy/internal/config"
+	"nlwproxy/internal/console"
 	"nlwproxy/internal/profiles"
 )
 
 type fakeCredentialSource map[string]string
 
 func (f fakeCredentialSource) Lookup(name string) (string, error) { return f[name], nil }
+
+type fakeCredentialStore map[string]string
+
+func (f fakeCredentialStore) Lookup(name string) (string, error) { return f[name], nil }
+func (f fakeCredentialStore) Set(name, value string) error       { f[name] = value; return nil }
+
+func TestCreateOnboardingProfileStoresOnlyProfileEnvironmentNames(t *testing.T) {
+	store, _ := profiles.Open(t.TempDir())
+	secrets := fakeCredentialStore{}
+	result := console.OnboardingResult{ProfileID: "reffaunlimited", Settings: console.OnboardingSettings{
+		Provider: "Reffa Unlimited", BaseURL: "https://api.example.test/v1", ProviderAPIKey: "provider-secret", GatewayAPIKey: "gateway-secret", DefaultModel: "model-x",
+		APIKeyEnv: "REFFAUNLIMITED_PROVIDER_API_KEY", GatewayAPIKeyEnv: "REFFAUNLIMITED_GATEWAY_API_KEY", BaseURLEnv: "REFFAUNLIMITED_BASE_URL", DefaultModelEnv: "REFFAUNLIMITED_DEFAULT_MODEL",
+	}}
+	p, err := createOnboardingProfile(store, result, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Config.Server.LocalTokenEnv != "REFFAUNLIMITED_GATEWAY_API_KEY" || p.Config.DefaultModel != "model-x" || p.Config.Upstreams[0].APIKeyEnv != "REFFAUNLIMITED_PROVIDER_API_KEY" {
+		t.Fatalf("profile=%+v", p)
+	}
+	b, _ := os.ReadFile(filepath.Join(store.Dir(), "reffaunlimited.json"))
+	if strings.Contains(string(b), "provider-secret") || strings.Contains(string(b), "gateway-secret") {
+		t.Fatal("profile leaked a secret")
+	}
+}
 
 func TestLoadCredentialUsesRegistryFallbackAndInjectsProcessEnvironment(t *testing.T) {
 	const name = "NLWPROXY_TEST_REGISTRY_CREDENTIAL"

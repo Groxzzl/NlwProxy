@@ -26,9 +26,44 @@ import (
 	"nlwproxy/internal/opencode"
 	"nlwproxy/internal/profiles"
 	"nlwproxy/internal/routing"
+	gatewayruntime "nlwproxy/internal/runtime"
 	"nlwproxy/internal/transport"
 	"nlwproxy/internal/tui"
+	"nlwproxy/internal/tuiapp"
 )
+
+var runTUIManagedGateway = runBubbleTeaGateway
+
+func runBubbleTeaGateway(args []string, out, errOut io.Writer) int {
+	fs := commandFlags("tui", errOut)
+	path := fs.String("config", defaultConfigPath(), "configuration path")
+	profilesDir := fs.String("profiles-dir", "profiles", "profiles directory")
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	store, err := profiles.Open(*profilesDir)
+	if err != nil {
+		fmt.Fprintln(errOut, "tui profiles:", err)
+		return 1
+	}
+	profile, err := prepareConsoleProfile(store, *path)
+	if err != nil {
+		fmt.Fprintln(errOut, "tui profiles:", err)
+		return 1
+	}
+	runtime, err := gatewayruntime.New(gatewayruntime.Options{Profile: profile, Credentials: registryCredentialSource{}})
+	if err != nil {
+		fmt.Fprintln(errOut, "tui startup:", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := tuiapp.RunRuntime(ctx, os.Stdin, out, tuiapp.NewRuntimeAdapter(runtime)); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintln(errOut, "tui:", err)
+		return 1
+	}
+	return 0
+}
 
 const version = "0.2.0"
 
@@ -44,9 +79,11 @@ func defaultConfigPath() string {
 }
 
 func Run(args []string, out, errOut io.Writer) int {
+	// No arguments → launch the dashboard TUI directly, so users can just type
+	// `nlwproxy` in a terminal and get the cockpit. Explicit subcommands still
+	// work as before.
 	if len(args) == 0 {
-		usage(out)
-		return 0
+		return runTUI(nil, out, errOut)
 	}
 	if args[0] == "gateway" {
 		return runGateway(args[1:], out, errOut)
@@ -54,6 +91,8 @@ func Run(args []string, out, errOut io.Writer) int {
 	switch args[0] {
 	case "init":
 		return runInit(args[1:], out, errOut)
+	case "install":
+		return runInstall(args[1:], out, errOut)
 	case "config":
 		return runConfig(args[1:], out, errOut)
 	case "proxy":
@@ -70,6 +109,8 @@ func Run(args []string, out, errOut io.Writer) int {
 		return runServe(args[1:], out, errOut)
 	case "console":
 		return runConsole(args[1:], out, errOut)
+	case "tui":
+		return runTUI(args[1:], out, errOut)
 	case "profile":
 		return runProfile(args[1:], out, errOut)
 	case "version", "--version":
@@ -500,6 +541,43 @@ func runProfile(args []string, out, errOut io.Writer) int {
 	}
 }
 
+func runTUI(args []string, out, errOut io.Writer) int {
+	return runTUIManagedGateway(args, out, errOut)
+}
+
+func runShellTUI(args []string, out, errOut io.Writer) int {
+	fs := commandFlags("tui", errOut)
+	path := fs.String("config", defaultConfigPath(), "configuration path")
+	profilesDir := fs.String("profiles-dir", "profiles", "profiles directory")
+	if fs.Parse(args) != nil {
+		return 2
+	}
+
+	snapshot := tuiapp.Snapshot{Status: "Not configured", Gateway: "gateway offline"}
+	if cfg, err := config.Load(*path); err == nil {
+		snapshot.Gateway = cfg.Server.Listen
+		snapshot.Status = "Configured"
+		for _, upstream := range cfg.Upstreams {
+			if upstream.Enabled {
+				snapshot.Connections++
+			}
+		}
+	}
+	if store, err := profiles.Open(*profilesDir); err == nil {
+		if selected, selectErr := store.Select(); selectErr == nil {
+			snapshot.Profile = selected.Name
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := tuiapp.Run(ctx, os.Stdin, out, tuiapp.NewStore(nil, snapshot)); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintln(errOut, "tui:", err)
+		return 1
+	}
+	return 0
+}
+
 func runConsole(args []string, out, errOut io.Writer) int {
 	fs := commandFlags("console", errOut)
 	path := fs.String("config", defaultConfigPath(), "configuration path")
@@ -548,17 +626,14 @@ func runConsole(args []string, out, errOut io.Writer) int {
 		selected, err = store.Activate(chosenID)
 	}
 	if errors.Is(err, profiles.ErrWizardRequired) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if _, err = (console.Wizard{In: os.Stdin, Out: out}).Run(ctx, *path); err != nil {
-			fmt.Fprintln(errOut, "console setup:", err)
+		result, wizardErr := (console.OnboardingWizard{In: os.Stdin, Out: out, Persist: registryCredentialSource{}.Set}).Run(ctx)
+		if wizardErr != nil {
+			fmt.Fprintln(errOut, "console setup:", wizardErr)
 			return 1
 		}
-		if _, _, err = store.Migrate(*path); err != nil {
-			fmt.Fprintln(errOut, "console profiles:", err)
-			return 1
-		}
-		selected, err = store.Select()
+		selected, err = createOnboardingProfile(store, result, registryCredentialSource{})
 	}
 	if err != nil {
 		fmt.Fprintln(errOut, "console profiles:", err)
@@ -676,6 +751,7 @@ func runConsole(args []string, out, errOut io.Writer) int {
 	go func() { serveErr <- gateway.Serve(gatewayCtx, cfg.Server.Listen, handler, 15*time.Second) }()
 
 	showKey := true
+	frozen := false
 	message := "Gateway starting..."
 	configuredRoutes := make([]console.RouteStat, 0, len(cfg.Upstreams))
 	for _, route := range cfg.Upstreams {
@@ -706,12 +782,19 @@ func runConsole(args []string, out, errOut io.Writer) int {
 			}
 		default:
 		}
-		return console.DashboardView{Status: status, Started: started, BaseURL: "http://" + cfg.Server.Listen + "/v1", APIKey: localToken, ShowAPIKey: showKey, Provider: up.Name, ModelAlias: "transparent", Requests: snap.Total, Errors: snap.Errors, Active: snap.Active, InputTokens: input, OutputTokens: output, Models: models, AvailableModels: catalog, Routes: routes, Recent: snap.Events, Message: message}
+		return console.DashboardView{Status: status, Frozen: frozen, Started: started, BaseURL: "http://" + cfg.Server.Listen + "/v1", APIKey: localToken, ShowAPIKey: showKey, Provider: up.Name, ModelAlias: "transparent", Requests: snap.Total, Errors: snap.Errors, Active: snap.Active, InputTokens: input, OutputTokens: output, Models: models, AvailableModels: catalog, Routes: routes, Recent: snap.Events, Message: message}
 	}
 	controller := console.Controller{Cancel: cancelGateway, Handle: func(actionCtx context.Context, action console.Action) error {
 		switch action {
 		case console.ActionRefresh:
 			message = "Dashboard refreshed."
+		case console.ActionFreeze:
+			frozen = !frozen
+			if frozen {
+				message = "Dashboard frozen. Press F to resume live updates."
+			} else {
+				message = "Dashboard live updates resumed."
+			}
 		case console.ActionTest:
 			testCtx, cancel := context.WithTimeout(actionCtx, 10*time.Second)
 			defer cancel()
@@ -773,6 +856,12 @@ func runConsole(args []string, out, errOut io.Writer) int {
 				message = err.Error()
 			} else {
 				message = "Gateway API key copied."
+			}
+		case console.ActionCopyURL:
+			if err := console.CopyClipboard("http://" + cfg.Server.Listen + "/v1"); err != nil {
+				message = err.Error()
+			} else {
+				message = "Gateway base URL copied."
 			}
 		case console.ActionCopyAll:
 			text := "Base URL: http://" + cfg.Server.Listen + "/v1\nAPI key: " + localToken + "\nModels: use IDs from /v1/models"
@@ -900,7 +989,12 @@ func (t *upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	clone := req.Clone(req.Context())
 	clone.URL.Scheme = t.base.Scheme
 	clone.URL.Host = t.base.Host
-	clone.URL.Path = strings.TrimRight(t.base.Path, "/") + req.URL.Path
+	basePath := strings.TrimRight(t.base.Path, "/")
+	requestPath := req.URL.Path
+	if strings.HasSuffix(basePath, "/v1") && strings.HasPrefix(requestPath, "/v1/") {
+		requestPath = strings.TrimPrefix(requestPath, "/v1")
+	}
+	clone.URL.Path = basePath + requestPath
 	clone.URL.RawPath = ""
 	if t.base.RawQuery != "" {
 		if clone.URL.RawQuery != "" {
@@ -1067,6 +1161,7 @@ Usage:
   nlwproxy setup [--opencode-config path] [--dry-run|--rollback] [--state-dir path]
   nlwproxy uninstall [--opencode-config path]
   nlwproxy console [--config path]
+  nlwproxy tui [--config path] [--profiles-dir path]
   nlwproxy profile <list|create|update|activate|use|delete> [id] [--dir profiles]
   nlwproxy gateway [--config path]
   nlwproxy serve [--config path]

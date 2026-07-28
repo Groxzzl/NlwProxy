@@ -77,7 +77,11 @@ func parseTelemetry(result *Result, contentType string, captured []byte) {
 	applyUsage(result, captured)
 }
 
-func Relay(ctx context.Context, w http.ResponseWriter, r io.Reader, started time.Time, contentType ...string) (result Result) {
+func Relay(ctx context.Context, w http.ResponseWriter, r io.Reader, started time.Time, contentType ...string) Result {
+	return RelayObserved(ctx, w, r, started, nil, contentType...)
+}
+
+func RelayObserved(ctx context.Context, w http.ResponseWriter, r io.Reader, started time.Time, firstByte func(time.Duration), contentType ...string) (result Result) {
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
 	var captured bytes.Buffer
@@ -112,6 +116,9 @@ func Relay(ctx context.Context, w http.ResponseWriter, r io.Reader, started time
 			if !result.Started {
 				result.Started = true
 				result.TTFT = time.Since(started)
+				if firstByte != nil {
+					firstByte(result.TTFT)
+				}
 			}
 			written, writeErr := w.Write(buf[:n])
 			result.Bytes += int64(written)

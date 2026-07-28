@@ -5,14 +5,25 @@ import (
 	"testing"
 )
 
-func TestClassificationNeverRetriesPolicyErrors(t *testing.T) {
+func TestClassificationNeverRetriesAuth(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		body   string
-	}{{401, ""}, {402, ""}, {403, ""}, {429, ""}, {400, `{"code":"insufficient_quota"}`}} {
+	}{{401, ""}, {402, ""}, {403, ""}} {
 		if d := Classify(tc.status, []byte(tc.body), nil, false); d.Retry || d.SwitchRoute {
 			t.Fatalf("status %d body %s: %+v", tc.status, tc.body, d)
 		}
+	}
+}
+func TestClassificationRetriesRateLimitAndQuota(t *testing.T) {
+	if d := Classify(429, nil, nil, false); !d.Retry || !d.SwitchRoute {
+		t.Fatalf("429 should switch route: %+v", d)
+	}
+	if d := Classify(200, []byte(`{"error":"FreeUsageLimitError","message":"rate limit exceeded"}`), nil, false); !d.Retry || !d.SwitchRoute {
+		t.Fatalf("free usage envelope should switch route: %+v", d)
+	}
+	if d := Classify(400, []byte(`{"code":"insufficient_quota"}`), nil, false); !d.Retry || !d.SwitchRoute {
+		t.Fatalf("insufficient_quota should switch route: %+v", d)
 	}
 }
 func TestClassificationRetriesOnlySafeFailures(t *testing.T) {

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "active": "myprovider",
+  "last_used": "myprovider",
+  "profiles": [
+    {
+      "id": "myprovider",
+      "name": "MyProvider",
+      "api_key_env": "MYPROVIDER_API_KEY",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ]
+}

@@ -67,7 +67,7 @@ func TestControllerActionsDispatchAndQuitCancels(t *testing.T) {
 	defer cancel()
 	var called []Action
 	ctl := Controller{Cancel: cancel, Handle: func(_ context.Context, a Action) error { called = append(called, a); return nil }}
-	for _, key := range []byte("RCNEWPDMLH") {
+	for _, key := range []byte("RBCUAFNEWPDMLH") {
 		if quit, err := ctl.Dispatch(ctx, key); quit || err != nil {
 			t.Fatalf("key %q quit=%v err=%v", key, quit, err)
 		}
@@ -80,14 +80,14 @@ func TestControllerActionsDispatchAndQuitCancels(t *testing.T) {
 	default:
 		t.Fatal("Q did not cancel")
 	}
-	if len(called) != 10 {
+	if len(called) != 14 {
 		t.Fatalf("called=%v", called)
 	}
 }
 
 func TestEventLoopInteractiveUsesAlternateScreenAndRestoresState(t *testing.T) {
 	var out bytes.Buffer
-	err := runEventLoop(context.Background(), strings.NewReader("q"), &out, time.Hour, Controller{}, func() string { return "FRAME\n" }, TerminalCapabilities{Interactive: true, Color: true, Width: 100})
+	err := runEventLoop(context.Background(), strings.NewReader("q"), &out, time.Hour, Controller{}, func() string { return "FRAME\n" }, nil, TerminalCapabilities{Interactive: true, Color: true, Width: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestEventLoopInteractiveUsesAlternateScreenAndRestoresState(t *testing.T) {
 func TestEventLoopRedirectedRendersOnceWithoutANSIOrAutoRefresh(t *testing.T) {
 	var out bytes.Buffer
 	renders := 0
-	err := runEventLoop(context.Background(), strings.NewReader(""), &out, time.Nanosecond, Controller{}, func() string { renders++; return "PLAIN\n" }, TerminalCapabilities{})
+	err := runEventLoop(context.Background(), strings.NewReader(""), &out, time.Nanosecond, Controller{}, func() string { renders++; return "PLAIN\n" }, nil, TerminalCapabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,5 +121,27 @@ func TestDashboardColorRendererAddsThemeOnlyWhenEnabled(t *testing.T) {
 	}
 	if strings.Contains(plain, "\x1b[") {
 		t.Fatalf("plain dashboard has ANSI: %q", plain)
+	}
+}
+
+func TestDashboardShowsSelectionSafeCopyAndFreezeControls(t *testing.T) {
+	got := RenderDashboardV2(DashboardView{Status: "ONLINE", Frozen: true}, false, 110)
+	for _, want := range []string{"FROZEN", "[B] Copy key", "[U] Copy URL", "[A] Copy details", "[C] Config templates", "[F] Freeze/unfreeze", "[R] Refresh"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestEventLoopFreezeSuppressesAutomaticRefresh(t *testing.T) {
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := runEventLoop(ctx, strings.NewReader("f"), &out, time.Millisecond, Controller{}, func() string { return "FRAME\n" }, nil, TerminalCapabilities{Interactive: true})
+	if err != nil && err != context.DeadlineExceeded {
+		t.Fatal(err)
+	}
+	if strings.Count(out.String(), "FRAME") != 2 {
+		t.Fatalf("freeze should draw initial and key-action frames only: %q", out.String())
 	}
 }
