@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // runInstall copies the running executable into a directory that is on the
@@ -16,6 +18,7 @@ import (
 func runInstall(args []string, out, errOut io.Writer) int {
 	fs := commandFlags("install", errOut)
 	dir := fs.String("dir", "", "target install directory (default: user bin on PATH)")
+	noPath := fs.Bool("no-path", false, "do not modify PATH automatically")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -48,18 +51,79 @@ func runInstall(args []string, out, errOut io.Writer) int {
 	}
 
 	fmt.Fprintf(out, "Installed nlwproxy to %s\n", dst)
-	if !dirOnPath(target) {
-		fmt.Fprintln(out, "")
-		fmt.Fprintln(out, "This directory is not on your PATH yet. Add it, then restart your terminal:")
-		if runtime.GOOS == "windows" {
-			fmt.Fprintf(out, "  setx PATH \"%%PATH%%;%s\"\n", target)
-		} else {
-			fmt.Fprintf(out, "  export PATH=\"$PATH:%s\"   # add to ~/.bashrc or ~/.zshrc\n", target)
-		}
-	} else {
+
+	if dirOnPath(target) {
 		fmt.Fprintln(out, "You can now run `nlwproxy` from any terminal.")
+		return 0
+	}
+
+	if !*noPath && addToUserPath(target) {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Added the install directory to your user PATH.")
+		fmt.Fprintln(out, "Open a NEW terminal, then run `nlwproxy`.")
+		return 0
+	}
+
+	// Fallback: could not modify PATH automatically — print manual instructions.
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Add this directory to your PATH, then restart your terminal:")
+	if runtime.GOOS == "windows" {
+		fmt.Fprintf(out, "  setx PATH \"%%PATH%%;%s\"\n", target)
+	} else {
+		fmt.Fprintf(out, "  export PATH=\"$PATH:%s\"   # add to ~/.bashrc or ~/.zshrc\n", target)
 	}
 	return 0
+}
+
+// addToUserPath appends dir to the current user's persistent PATH on Windows,
+// writing DIRECTLY to the registry (bypassing setx's 1024-char limit).
+// No admin rights required. On non-Windows it returns false.
+func addToUserPath(dir string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	userPath := readUserPath()
+	for _, p := range strings.Split(userPath, ";") {
+		if filepath.Clean(strings.TrimSpace(p)) == filepath.Clean(dir) {
+			return true // already present
+		}
+	}
+	newPath := userPath
+	if strings.TrimSpace(userPath) != "" {
+		newPath = strings.TrimRight(userPath, ";") + ";" + dir
+	} else {
+		newPath = dir
+	}
+	// Use reg add to write directly to HKCU\Environment\PATH, avoiding the
+	// 1024-char limit that makes `setx PATH <long>` silently fail.
+	// Do NOT specify /t — let reg preserve the existing type (REG_SZ vs REG_EXPAND_SZ).
+	cmd := exec.Command("reg", "add", `HKCU\Environment`, "/v", "PATH", "/d", newPath, "/f")
+	return cmd.Run() == nil
+}
+
+// readUserPath returns the current user's persistent PATH (HKCU\Environment),
+// which is what setx writes to. Empty string if unset or unreadable.
+func readUserPath() string {
+	out, err := exec.Command("reg", "query", "HKCU\\Environment", "/v", "PATH").Output()
+	if err != nil {
+		return ""
+	}
+	// Output line looks like:  "    PATH    REG_SZ    C:\a;C:\b"
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(strings.ToUpper(line), "PATH") {
+			continue
+		}
+		fields := strings.SplitN(strings.TrimSpace(line), "REG_", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		// fields[1] = "SZ    <value>" or "EXPAND_SZ    <value>"
+		parts := strings.SplitN(fields[1], " ", 2)
+		if len(parts) == 2 {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
 }
 
 func defaultInstallDir() string {

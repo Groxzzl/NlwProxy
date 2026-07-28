@@ -25,11 +25,13 @@ type RuntimeAdapter struct {
 	dash       *dashboard.Aggregator
 	ops        *operationsSource
 	proxies    *proxymanager.Manager
+	dataDir    string
 	importOnce sync.Once
 }
 
 func NewRuntimeAdapter(runtime *gatewayruntime.GatewayRuntime) *RuntimeAdapter {
 	a := &RuntimeAdapter{runtime: runtime, dash: dashboard.New(dashboard.Config{Window: 5 * time.Minute, Buckets: 30, RecentLimit: 500, History: 60})}
+	a.dataDir = resolveDataDir()
 	a.proxies = proxymanager.New(nil)
 	a.ops = &operationsSource{adapter: a}
 	a.store = NewStore(runtime.Events(), a.snapshot())
@@ -37,6 +39,23 @@ func NewRuntimeAdapter(runtime *gatewayruntime.GatewayRuntime) *RuntimeAdapter {
 		_ = runtime.ReloadHealthyProxies(entries)
 	})
 	return a
+}
+
+// resolveDataDir returns the directory that holds proxy files. It prefers a
+// local ./data (developer checkout) and otherwise uses the per-user home dir
+// (%APPDATA%\nlwproxy\data or ~/.config/nlwproxy/data, overridable via
+// NLWPROXY_HOME), so `nlwproxy` finds the same proxies from any working dir.
+func resolveDataDir() string {
+	if fi, err := os.Stat("data"); err == nil && fi.IsDir() {
+		return "data"
+	}
+	if h := os.Getenv("NLWPROXY_HOME"); h != "" {
+		return filepath.Join(h, "data")
+	}
+	if d, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(d, "nlwproxy", "data")
+	}
+	return "data"
 }
 
 func (a *RuntimeAdapter) Source() StateSource {
@@ -77,20 +96,20 @@ func (a *RuntimeAdapter) Start(ctx context.Context) error {
 				sb.WriteString(p.URL())
 				sb.WriteByte('\n')
 			}
-			dir := filepath.Join("data", "proxies")
+			dir := filepath.Join(a.dataDir, "proxies")
 			_ = os.MkdirAll(dir, 0o755)
 			_ = os.WriteFile(filepath.Join(dir, "github-auto.txt"), []byte(sb.String()), 0o644)
 		}()
 
-		// Multi-file loader: auto-import every *.txt under data/proxies/,
-		// deduped by host:port, then persist the merged set to data/proxies.json.
-		proxyDir := filepath.Join("data", "proxies")
+		// Multi-file loader: auto-import every *.txt under <dataDir>/proxies/,
+		// deduped by host:port, then persist the merged set to <dataDir>/proxies.json.
+		proxyDir := filepath.Join(a.dataDir, "proxies")
 		added, _ := a.proxies.LoadDir(proxyDir)
 
 		// Fallback single-file import for backward compatibility.
 		if added == 0 {
 			candidates := []string{
-				filepath.Join("data", "webshare-proxies.txt"),
+				filepath.Join(a.dataDir, "webshare-proxies.txt"),
 				filepath.Join(os.Getenv("USERPROFILE"), "Downloads", "Webshare 10 proxies.txt"),
 			}
 			for _, path := range candidates {
@@ -100,7 +119,7 @@ func (a *RuntimeAdapter) Start(ctx context.Context) error {
 				}
 			}
 		}
-		_ = a.proxies.SaveJSON(filepath.Join("data", "proxies.json"))
+		_ = a.proxies.SaveJSON(filepath.Join(a.dataDir, "proxies.json"))
 	})
 	if err := a.runtime.Start(ctx); err != nil {
 		a.store.Set(a.snapshot())

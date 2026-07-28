@@ -37,7 +37,7 @@ var runTUIManagedGateway = runBubbleTeaGateway
 func runBubbleTeaGateway(args []string, out, errOut io.Writer) int {
 	fs := commandFlags("tui", errOut)
 	path := fs.String("config", defaultConfigPath(), "configuration path")
-	profilesDir := fs.String("profiles-dir", "profiles", "profiles directory")
+	profilesDir := fs.String("profiles-dir", defaultProfilesDir(), "profiles directory")
 	if fs.Parse(args) != nil {
 		return 2
 	}
@@ -71,11 +71,32 @@ func defaultConfigPath() string {
 	if p := os.Getenv("NLWPROXY_CONFIG"); p != "" {
 		return p
 	}
+	return filepath.Join(homeDir(), "config.json")
+}
+
+// homeDir is the single directory that holds all of NLW Proxy's persistent user
+// data: config.json, profiles/, and data/proxies/. It defaults to
+// %APPDATA%\nlwproxy (Windows) or ~/.config/nlwproxy (Unix) and can be
+// overridden with NLWPROXY_HOME. Using one fixed home means `nlwproxy` behaves
+// identically no matter which directory the user runs it from.
+func homeDir() string {
+	if h := os.Getenv("NLWPROXY_HOME"); h != "" {
+		return h
+	}
 	d, err := os.UserConfigDir()
 	if err != nil {
-		return "nlwproxy.json"
+		return "."
 	}
-	return filepath.Join(d, "nlwproxy", "config.json")
+	return filepath.Join(d, "nlwproxy")
+}
+
+// defaultProfilesDir returns the profiles directory under the home dir, falling
+// back to a local ./profiles when it already exists (developer checkout).
+func defaultProfilesDir() string {
+	if fi, err := os.Stat("profiles"); err == nil && fi.IsDir() {
+		return "profiles"
+	}
+	return filepath.Join(homeDir(), "profiles")
 }
 
 func Run(args []string, out, errOut io.Writer) int {
@@ -548,7 +569,7 @@ func runTUI(args []string, out, errOut io.Writer) int {
 func runShellTUI(args []string, out, errOut io.Writer) int {
 	fs := commandFlags("tui", errOut)
 	path := fs.String("config", defaultConfigPath(), "configuration path")
-	profilesDir := fs.String("profiles-dir", "profiles", "profiles directory")
+	profilesDir := fs.String("profiles-dir", defaultProfilesDir(), "profiles directory")
 	if fs.Parse(args) != nil {
 		return 2
 	}
@@ -581,7 +602,7 @@ func runShellTUI(args []string, out, errOut io.Writer) int {
 func runConsole(args []string, out, errOut io.Writer) int {
 	fs := commandFlags("console", errOut)
 	path := fs.String("config", defaultConfigPath(), "configuration path")
-	profilesDir := fs.String("profiles-dir", "profiles", "profiles directory")
+	profilesDir := fs.String("profiles-dir", defaultProfilesDir(), "profiles directory")
 	if fs.Parse(args) != nil {
 		return 2
 	}
