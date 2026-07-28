@@ -104,6 +104,7 @@ func Run(args []string, out, errOut io.Writer) int {
 	// `nlwproxy` in a terminal and get the cockpit. Explicit subcommands still
 	// work as before.
 	if len(args) == 0 {
+		ensureHomeConfig()
 		return runTUI(nil, out, errOut)
 	}
 	if args[0] == "gateway" {
