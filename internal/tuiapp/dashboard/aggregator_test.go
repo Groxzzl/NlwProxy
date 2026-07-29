@@ -71,6 +71,25 @@ func TestAggregatorDeduplicatesSnapshotsAndMaintainsBoundedHistory(t *testing.T)
 	}
 }
 
+func TestAggregatorRefreshesWhenOnlyRouteStateChanges(t *testing.T) {
+	now := time.Now()
+	a := New(Config{})
+	input := metrics.Snapshot{Revision: 7}
+	routes := map[string]routing.RouteSnapshot{"proxy": {Health: routing.Healthy, Total: 1}}
+	first := a.Update(now, input, routes)
+	if first.Routes["proxy"].Snapshot.CooldownUntil != (time.Time{}) {
+		t.Fatal("unexpected initial cooldown")
+	}
+	route := routes["proxy"]
+	route.CooldownUntil = now.Add(time.Hour)
+	route.Circuit = routing.CircuitOpen
+	routes["proxy"] = route
+	second := a.Update(now.Add(time.Second), input, routes)
+	if second.Routes["proxy"].Snapshot.CooldownUntil.IsZero() || second.Routes["proxy"].Snapshot.Circuit != routing.CircuitOpen {
+		t.Fatalf("route-only change stayed stale: %+v", second.Routes["proxy"].Snapshot)
+	}
+}
+
 func TestRingPercentileAndSparklineEdgeCases(t *testing.T) {
 	r := NewRing[int](3)
 	for _, value := range []int{1, 2, 3, 4, 5} {

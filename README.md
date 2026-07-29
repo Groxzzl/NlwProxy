@@ -308,7 +308,7 @@ console.log(response.choices[0].message.content);
 | `q` | Quit |
 | `Ctrl+Shift+C` | Copy selected terminal text |
 
-The dashboard has pages for overview, models, proxies, routes, requests, logs, profiles, and settings.
+The dashboard has pages for overview, models, proxies, routes, requests, logs, profiles, and settings. It refreshes when request, proxy, or route state changes and stays still while idle. Freeze mode keeps the current frame selectable; unfreezing jumps straight to the newest state.
 
 ## Command reference
 

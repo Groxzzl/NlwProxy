@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"encoding/binary"
+	"hash/fnv"
 	"sort"
 	"sync"
 	"time"
@@ -52,7 +54,7 @@ type Snapshot struct {
 type Aggregator struct {
 	mu                       sync.RWMutex
 	cfg                      Config
-	lastRevision             uint64
+	lastRevision, lastRoutes uint64
 	snapshot                 Snapshot
 	requests, errors, tokens *Ring[float64]
 }
@@ -76,7 +78,8 @@ func New(cfg Config) *Aggregator {
 func (a *Aggregator) Update(now time.Time, input metrics.Snapshot, routes map[string]routing.RouteSnapshot) Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if input.Revision != 0 && input.Revision == a.lastRevision {
+	routeRevision := hashRoutes(routes)
+	if input.Revision != 0 && input.Revision == a.lastRevision && routeRevision == a.lastRoutes {
 		return clone(a.snapshot)
 	}
 
@@ -166,8 +169,36 @@ func (a *Aggregator) Update(now time.Time, input metrics.Snapshot, routes map[st
 	a.tokens.Push(float64(global.TotalTokens))
 	sparks := Sparklines{a.requests.Values(), a.errors.Values(), a.tokens.Values()}
 	a.lastRevision = input.Revision
+	a.lastRoutes = routeRevision
 	a.snapshot = Snapshot{At: now, Revision: input.Revision, Global: global, Models: models, Routes: viewRoutes, Active: active, Recent: recent, Buckets: buckets, Rates: rates, Sparklines: sparks, Sparkline: Sparkline(sparks.Requests)}
 	return clone(a.snapshot)
+}
+
+func hashRoutes(routes map[string]routing.RouteSnapshot) uint64 {
+	names := make([]string, 0, len(routes))
+	for name := range routes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := fnv.New64a()
+	var b [8]byte
+	for _, name := range names {
+		route := routes[name]
+		_, _ = h.Write([]byte(name))
+		_, _ = h.Write([]byte(route.Health))
+		_, _ = h.Write([]byte(route.Circuit))
+		binary.LittleEndian.PutUint64(b[:], uint64(route.Active))
+		_, _ = h.Write(b[:])
+		binary.LittleEndian.PutUint64(b[:], uint64(route.Total))
+		_, _ = h.Write(b[:])
+		binary.LittleEndian.PutUint64(b[:], uint64(route.Errors))
+		_, _ = h.Write(b[:])
+		binary.LittleEndian.PutUint64(b[:], uint64(route.Latency))
+		_, _ = h.Write(b[:])
+		binary.LittleEndian.PutUint64(b[:], uint64(route.CooldownUntil.UnixNano()))
+		_, _ = h.Write(b[:])
+	}
+	return h.Sum64()
 }
 
 func addEvent(stat *Stats, event metrics.Request, tokens int64) {

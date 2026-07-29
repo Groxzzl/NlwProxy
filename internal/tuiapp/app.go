@@ -256,6 +256,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keys.Freeze) {
 			if m.frozen {
 				m.frozen, m.frozenView = false, ""
+				if m.source != nil {
+					m.snapshot = m.source.Snapshot()
+				}
+				m.refreshOverviewDash()
+				m.refreshSettings()
 				return m, Notify(m.ctx, m.source)
 			}
 			m.frozen = true

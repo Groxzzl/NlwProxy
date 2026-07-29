@@ -224,6 +224,22 @@ func TestStableIdleViewAndNoIdleCommand(t *testing.T) {
 	}
 }
 
+func TestUnfreezeImmediatelyCatchesUpToLatestSourceSnapshot(t *testing.T) {
+	store := NewStore(nil, Snapshot{Gateway: "before", Requests: 1})
+	model := New(context.Background(), store)
+	model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: 100, Height: 24})
+	model, _ = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	store.Set(Snapshot{Gateway: "after", Requests: 9})
+	model, _ = updateModel(t, model, ChangedMsg(store.Snapshot()))
+	if model.snapshot.Gateway != "before" {
+		t.Fatalf("frozen model consumed new snapshot: %+v", model.snapshot)
+	}
+	model, _ = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if model.snapshot.Gateway != "after" || model.snapshot.Requests != 9 {
+		t.Fatalf("unfreeze did not catch up immediately: %+v", model.snapshot)
+	}
+}
+
 func TestFreezePreservesRenderedProxySelectionUntilUnfrozen(t *testing.T) {
 	source := newProxySource(250)
 	model := New(context.Background(), nil)
