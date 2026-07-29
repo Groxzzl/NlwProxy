@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -75,31 +76,31 @@ type proxyManagerSource struct {
 func (s proxyManagerSource) Reload(ctx context.Context) error { return s.reload(ctx) }
 func (a *RuntimeAdapter) Start(ctx context.Context) error {
 	a.importOnce.Do(func() {
-		// Optional GitHub free-proxy scrape as a supplementary pool. Best-effort:
-		// on any failure we simply proceed with whatever local files exist. The
-		// scraped set is capped so batch health-testing stays fast; Webshare
-		// files remain the reliable backbone and take dedup precedence.
-		func() {
-			scrapeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			results := proxyimport.ScrapeAll(scrapeCtx)
-			proxies := proxyimport.Deduplicate(proxyimport.FlattenResults(results))
-			const maxScraped = 200
-			if len(proxies) > maxScraped {
-				proxies = proxies[:maxScraped]
-			}
-			if len(proxies) == 0 {
-				return
-			}
-			var sb strings.Builder
-			for _, p := range proxies {
-				sb.WriteString(p.URL())
-				sb.WriteByte('\n')
-			}
-			dir := filepath.Join(a.dataDir, "proxies")
-			_ = os.MkdirAll(dir, 0o755)
-			_ = os.WriteFile(filepath.Join(dir, "github-auto.txt"), []byte(sb.String()), 0o644)
-		}()
+		// Public scraping is opt-in. A verified local pool must not be mixed with
+		// fresh untested GitHub entries every time the gateway restarts.
+		if strings.EqualFold(os.Getenv("NLWPROXY_SCRAPE_PUBLIC"), "true") || os.Getenv("NLWPROXY_SCRAPE_PUBLIC") == "1" {
+			func() {
+				scrapeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				results := proxyimport.ScrapeAll(scrapeCtx)
+				proxies := proxyimport.Deduplicate(proxyimport.FlattenResults(results))
+				const maxScraped = 200
+				if len(proxies) > maxScraped {
+					proxies = proxies[:maxScraped]
+				}
+				if len(proxies) == 0 {
+					return
+				}
+				var sb strings.Builder
+				for _, p := range proxies {
+					sb.WriteString(p.URL())
+					sb.WriteByte('\n')
+				}
+				dir := filepath.Join(a.dataDir, "proxies")
+				_ = os.MkdirAll(dir, 0o755)
+				_ = os.WriteFile(filepath.Join(dir, "github-auto.txt"), []byte(sb.String()), 0o600)
+			}()
+		}
 
 		// Multi-file loader: auto-import every *.txt under <dataDir>/proxies/,
 		// deduped by host:port, then persist the merged set to <dataDir>/proxies.json.
@@ -119,6 +120,18 @@ func (a *RuntimeAdapter) Start(ctx context.Context) error {
 				}
 			}
 		}
+		// Re-test imported entries at startup so proxy-only mode has usable routes
+		// without requiring the user to open the Proxies page and press T first.
+		testCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		_ = a.proxies.TestAll(testCtx, "https://www.cloudflare.com/cdn-cgi/trace")
+		cancel()
+		alive := a.proxies.ListAlive()
+		sort.SliceStable(alive, func(i, j int) bool { return alive[i].Latency < alive[j].Latency })
+		const maxActiveRoutes = 120
+		if len(alive) > maxActiveRoutes {
+			alive = alive[:maxActiveRoutes]
+		}
+		_ = a.runtime.ReloadHealthyProxies(alive)
 		_ = a.proxies.SaveJSON(filepath.Join(a.dataDir, "proxies.json"))
 	})
 	if err := a.runtime.Start(ctx); err != nil {

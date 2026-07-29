@@ -272,12 +272,14 @@ func httpConnectHandshake(ctx context.Context, conn net.Conn, targetHost string,
 	if err != nil {
 		return nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 32<<10))
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
 	}
+	// A successful CONNECT switches this same connection into tunnel mode.
+	// Reading resp.Body here would read from the tunnel until timeout/EOF and
+	// falsely mark a working proxy as dead.
 
 	_ = conn.SetDeadline(time.Time{})
 	return conn, nil

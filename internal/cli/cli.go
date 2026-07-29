@@ -920,81 +920,40 @@ func runConsole(args []string, out, errOut io.Writer) int {
 func runServe(args []string, out, errOut io.Writer) int {
 	fs := commandFlags("serve", errOut)
 	path := fs.String("config", defaultConfigPath(), "configuration path")
+	profilesDir := fs.String("profiles-dir", defaultProfilesDir(), "profiles directory")
 	if fs.Parse(args) != nil {
 		return 2
 	}
-	cfg, err := config.Load(*path)
+	store, err := profiles.Open(*profilesDir)
 	if err != nil {
-		fmt.Fprintln(errOut, "configuration:", err)
+		fmt.Fprintln(errOut, "serve profiles:", err)
 		return 1
 	}
-	token := os.Getenv(cfg.Server.LocalTokenEnv)
-	if cfg.Server.LocalTokenEnv == "" || token == "" {
-		fmt.Fprintln(errOut, "serve: server.local_token_env must name a non-empty environment variable")
+	profile, err := prepareConsoleProfile(store, *path)
+	if err != nil {
+		fmt.Fprintln(errOut, "serve profiles:", err)
 		return 1
 	}
-	targets := make([]routing.Target, 0, len(cfg.Upstreams))
-	for _, up := range cfg.Upstreams {
-		if !up.Enabled {
-			continue
-		}
-		base, parseErr := url.Parse(up.BaseURL)
-		if parseErr != nil {
-			fmt.Fprintf(errOut, "serve: route %s: %v\n", up.Name, parseErr)
-			return 1
-		}
-		mode := transport.Direct
-		if up.ProxyURL != "" {
-			proxy, proxyErr := url.Parse(up.ProxyURL)
-			if proxyErr != nil {
-				fmt.Fprintf(errOut, "serve: route %s proxy: %v\n", up.Name, proxyErr)
-				return 1
-			}
-			if proxy.Scheme == "socks5" || proxy.Scheme == "socks5h" {
-				mode = transport.SOCKS5
-			} else {
-				mode = transport.HTTPProxy
-			}
-		}
-		roundTripper, transportErr := transport.New(transport.Config{Mode: mode, ProxyURL: up.ProxyURL, Timeout: 30 * time.Second})
-		if transportErr != nil {
-			fmt.Fprintf(errOut, "serve: route %s: %v\n", up.Name, transportErr)
-			return 1
-		}
-		apiKey := ""
-		if up.APIKeyEnv != "" {
-			apiKey = os.Getenv(up.APIKeyEnv)
-			if apiKey == "" {
-				fmt.Fprintf(errOut, "serve: route %s requires non-empty environment variable %s\n", up.Name, up.APIKeyEnv)
-				return 1
-			}
-		}
-		targets = append(targets, routing.Target{Name: up.Name, Priority: up.Priority, Enabled: true, MaxConcurrency: 8, TransportType: string(mode), Transport: &upstreamTransport{base: base, apiKey: apiKey, headers: up.Headers, next: roundTripper}})
-	}
-	if len(targets) == 0 {
-		fmt.Fprintln(errOut, "serve: no enabled upstream routes")
+	runtime, err := gatewayruntime.New(gatewayruntime.Options{Profile: profile, Credentials: registryCredentialSource{}})
+	if err != nil {
+		fmt.Fprintln(errOut, "serve startup:", err)
 		return 1
 	}
-	strategy := routing.Priority
-	if cfg.Routing.Strategy == "round_robin" {
-		strategy = routing.RoundRobin
-	}
-	probe := cfg.Observability.ExitIPProbe
-	probeTimeout, _ := time.ParseDuration(probe.Timeout)
-	probeTTL, _ := time.ParseDuration(probe.CacheTTL)
-	selector := routing.New(targets, routing.Config{Strategy: strategy, ExitIPProbe: routing.ExitIPProbeConfig{Enabled: probe.Enabled, URL: probe.URL, Timeout: probeTimeout, CacheTTL: probeTTL}})
-	modelService := &gateway.CachedModelService{Transport: targets[0].Transport, TTL: 5 * time.Minute}
-	handler := gateway.New(gateway.Config{Token: token, StrictOpenCode: cfg.Server.StrictOpenCodeClient, MaxBodyBytes: cfg.Server.MaxBodyBytes, Attempts: 2, Models: modelService}, selector)
+	adapter := tuiapp.NewRuntimeAdapter(runtime)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		catalogCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		_, _ = modelService.Discover(catalogCtx)
-	}()
-	fmt.Fprintln(out, "NLW Proxy listening on", cfg.Server.Listen)
-	if err := gateway.Serve(ctx, cfg.Server.Listen, handler, 15*time.Second); err != nil {
+	if err := adapter.Start(ctx); err != nil {
 		fmt.Fprintln(errOut, "serve:", err)
+		return 1
+	}
+	snapshot := runtime.Snapshot()
+	fmt.Fprintln(out, "NLW Proxy listening on", snapshot.Listen)
+	fmt.Fprintln(out, "Routing mode: proxy-only")
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := adapter.Stop(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintln(errOut, "serve shutdown:", err)
 		return 1
 	}
 	return 0

@@ -2,10 +2,13 @@ package gatewayruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +16,29 @@ import (
 	"nlwproxy/internal/config"
 	"nlwproxy/internal/profiles"
 	"nlwproxy/internal/proxymanager"
+	"nlwproxy/internal/routing"
 )
+
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestModelFailoverTransportSkipsDeadProxy(t *testing.T) {
+	var secondCalls int
+	f := &failoverTransport{targets: []routing.Target{
+		{Name: "dead", Transport: testRoundTripper(func(*http.Request) (*http.Response, error) { return nil, errors.New("dead") })},
+		{Name: "good", Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
+			secondCalls++
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[]}`)), Request: r}, nil
+		})},
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	resp, err := f.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusOK || secondCalls != 1 {
+		t.Fatalf("resp=%v err=%v secondCalls=%d", resp, err, secondCalls)
+	}
+	_ = resp.Body.Close()
+}
 
 func TestReloadHealthyProxiesReplacesRoutesAndRoundRobinsWithoutDirect(t *testing.T) {
 	var mu sync.Mutex
@@ -83,6 +108,9 @@ func TestReloadHealthyProxiesReplacesRoutesAndRoundRobinsWithoutDirect(t *testin
 
 	if got := rt.Snapshot().Routes; len(got) != 2 || got["provider@p1"].Health != "healthy" || got["provider@p2"].Health != "healthy" {
 		t.Fatalf("routes after reload = %#v", got)
+	}
+	if rt.models.Transport == nil {
+		t.Fatal("model transport was not moved onto the verified proxy pool")
 	}
 	for i := 0; i < 4; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)

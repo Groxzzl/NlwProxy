@@ -1,6 +1,7 @@
 package proxytest
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -144,6 +145,35 @@ func TestHTTPConnectHandshakeOK(t *testing.T) {
 	}
 	if tunnel == nil {
 		t.Fatal("expected non-nil tunnel conn")
+	}
+}
+
+func TestHTTPConnectHandshakeDoesNotDrainOpenTunnel(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	keepOpen := make(chan struct{})
+	go func() {
+		req, err := http.ReadRequest(bufio.NewReader(server))
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		_, _ = io.WriteString(server, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		<-keepOpen
+	}()
+	defer close(keepOpen)
+
+	started := time.Now()
+	tunnel, err := httpConnectHandshake(context.Background(), client, "opencode.ai:443", nil, time.Second)
+	if err != nil {
+		t.Fatalf("httpConnectHandshake: %v", err)
+	}
+	if tunnel == nil {
+		t.Fatal("expected non-nil tunnel conn")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("CONNECT handshake drained the open tunnel: %v", elapsed)
 	}
 }
 

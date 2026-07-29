@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -224,7 +225,49 @@ func (r *GatewayRuntime) ReloadHealthyProxies(entries []proxymanager.ProxyEntry)
 	for _, target := range targets {
 		r.selector.SetHealth(target.Name, routing.Healthy, target.Latency)
 	}
+	// Model discovery must obey proxy-only mode too. Without this assignment,
+	// /v1/models keeps the direct provider transport created during startup.
+	if len(targets) > 0 && r.models != nil {
+		r.models.Transport = &failoverTransport{targets: targets}
+	}
 	return nil
+}
+
+// failoverTransport is used for model discovery in proxy-only mode. It tries
+// each verified proxy until one returns a successful response. Regular
+// inference already performs route failover in the gateway handler.
+type failoverTransport struct {
+	mu      sync.Mutex
+	next    int
+	targets []routing.Target
+}
+
+func (f *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	start := f.next
+	f.next = (f.next + 1) % len(f.targets)
+	f.mu.Unlock()
+	var lastErr error
+	for offset := 0; offset < len(f.targets); offset++ {
+		target := f.targets[(start+offset)%len(f.targets)]
+		clone := req.Clone(req.Context())
+		resp, err := target.Transport.RoundTrip(clone)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("model route %s returned %d", target.Name, resp.StatusCode)
+			continue
+		}
+		return resp, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no model discovery proxy available")
+	}
+	return nil, lastErr
 }
 
 func buildProxyTargets(providers []providerRoute, entries []proxymanager.ProxyEntry, timeout time.Duration) ([]routing.Target, error) {
