@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"nlwproxy/internal/config"
 )
@@ -34,7 +35,8 @@ func ensureHomeConfig() {
 		// Copy profile detail files
 		entries, _ := os.ReadDir("profiles")
 		for _, e := range entries {
-			if e.IsDir() || e.Name() == "index.json" || filepath.Ext(e.Name()) == ".example" {
+			name := strings.ToLower(e.Name())
+			if e.IsDir() || e.Name() == "index.json" || filepath.Ext(name) != ".json" || strings.Contains(name, ".example.") {
 				continue
 			}
 			data, err := os.ReadFile(filepath.Join("profiles", e.Name()))

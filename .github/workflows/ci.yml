@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -count=1 -timeout 180s
+      - name: Build
+        run: go build -trimpath ./cmd/nlwproxy
+
+  cross-build:
+    name: Cross-build binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build Windows AMD64
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o nlwproxy-windows-amd64.exe ./cmd/nlwproxy
+      - name: Build Linux AMD64
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o nlwproxy-linux-amd64 ./cmd/nlwproxy
+      - name: Build macOS ARM64
+        run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o nlwproxy-darwin-arm64 ./cmd/nlwproxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nlwproxy-binaries
+          path: |
+            nlwproxy-windows-amd64.exe
+            nlwproxy-linux-amd64
+            nlwproxy-darwin-arm64

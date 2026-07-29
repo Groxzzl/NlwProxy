@@ -18,9 +18,9 @@
   },
   "upstreams": [
     {
-      "name": "ReffaUnlimited",
+      "name": "MyProvider",
       "base_url": "https://opencode.ai/zen/v1",
-      "api_key_env": "REFFAUNLIMITED_API_KEY",
+      "api_key_env": "MYPROVIDER_API_KEY",
       "priority": 10,
       "weight": 1,
       "enabled": true

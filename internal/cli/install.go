@@ -34,6 +34,7 @@ func runInstall(args []string, out, errOut io.Writer) int {
 	if target == "" {
 		target = defaultInstallDir()
 	}
+	target = normalizeWindowsMSYSPath(target)
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		fmt.Fprintln(errOut, "install: cannot create target dir:", err)
 		return 1
@@ -124,6 +125,19 @@ func readUserPath() string {
 		}
 	}
 	return ""
+}
+
+// normalizeWindowsMSYSPath converts Git Bash/MSYS paths such as /c/Users/me/bin
+// to C:\Users\me\bin before passing them to Windows filesystem APIs.
+func normalizeWindowsMSYSPath(p string) string {
+	if runtime.GOOS != "windows" || len(p) < 3 || p[0] != '/' || p[2] != '/' {
+		return p
+	}
+	drive := p[1]
+	if (drive < 'a' || drive > 'z') && (drive < 'A' || drive > 'Z') {
+		return p
+	}
+	return strings.ToUpper(string(drive)) + ":" + filepath.FromSlash(p[2:])
 }
 
 func defaultInstallDir() string {

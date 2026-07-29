@@ -1171,6 +1171,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `nlwproxy — OpenCode-only local proxy manager
 
 Usage:
+  nlwproxy                         # launch dashboard
+  nlwproxy install [--dir path] [--no-path]
   nlwproxy init [--config path] [--force]
   nlwproxy config <check|path|print-redacted> [--config path]
   nlwproxy proxy add <name> --base-url URL [--proxy-url URL] [--api-key-env ENV]

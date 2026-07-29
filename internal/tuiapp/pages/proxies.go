@@ -3,6 +3,8 @@ package pages
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +26,16 @@ type ProxyManagerSource interface {
 	Get(id string) (proxymanager.ProxyEntry, bool)
 	Remove(id string) bool
 	Reload(context.Context) error
+}
+
+func defaultProxyImportDir() string {
+	if h := strings.TrimSpace(os.Getenv("NLWPROXY_HOME")); h != "" {
+		return filepath.Join(h, "data", "proxies") + string(os.PathSeparator)
+	}
+	if d, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(d, "nlwproxy", "data", "proxies") + string(os.PathSeparator)
+	}
+	return filepath.Join("data", "proxies") + string(os.PathSeparator)
 }
 
 type testResultMsg struct{ Result proxymanager.TestResult }
@@ -334,8 +346,8 @@ func (m ProxiesPage) Update(msg tea.Msg) (ProxiesPage, tea.Cmd) {
 			m.searchBuffer = m.Query
 		case "i":
 			m.importing = true
-			m.importBuffer = "data/proxies/"
-			m.Message = "Type a proxy file path, then Enter to import (Esc to cancel)"
+			m.importBuffer = defaultProxyImportDir()
+			m.Message = "Type a proxy file path, then press Enter"
 		case "up", "k":
 			m.moveCursor(-1)
 		case "down", "j":

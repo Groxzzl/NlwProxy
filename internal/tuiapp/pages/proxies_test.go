@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -262,13 +264,15 @@ func (s *importSourceStub) ImportFile(path string) (int, []string) {
 }
 
 func TestProxiesImportModeShowsPrompt(t *testing.T) {
+	t.Setenv("NLWPROXY_HOME", t.TempDir())
 	m := NewProxiesPage(&proxySourceStub{entries: proxyEntries()})
 	m, _ = m.Update(proxyKey('i'))
 	if !m.importing {
 		t.Fatal("import mode not active after pressing i")
 	}
+	base := defaultProxyImportDir()
 	view := m.View()
-	if !strings.Contains(view, "Import path: data/proxies/") {
+	if !strings.Contains(view, "Import path: "+base) {
 		t.Fatalf("prompt missing default hint:\n%s", view)
 	}
 	if !strings.Contains(view, "Enter to import, Esc to cancel") {
@@ -278,7 +282,7 @@ func TestProxiesImportModeShowsPrompt(t *testing.T) {
 	for _, r := range "webshare-02.txt" {
 		m, _ = m.Update(proxyKey(r))
 	}
-	if !strings.Contains(m.View(), "Import path: data/proxies/webshare-02.txt█") {
+	if !strings.Contains(m.View(), "Import path: "+base+"webshare-02.txt█") {
 		t.Fatalf("typed path not rendered with cursor:\n%s", m.View())
 	}
 	// Esc cancels without importing.
@@ -292,6 +296,7 @@ func TestProxiesImportModeShowsPrompt(t *testing.T) {
 }
 
 func TestProxiesImportInvokesImportFileOnEnter(t *testing.T) {
+	t.Setenv("NLWPROXY_HOME", t.TempDir())
 	source := &importSourceStub{added: 4}
 	source.entries = proxyEntries()
 	m := NewProxiesPage(source)
@@ -300,8 +305,9 @@ func TestProxiesImportInvokesImportFileOnEnter(t *testing.T) {
 		m, _ = m.Update(proxyKey(r))
 	}
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if len(source.calledWith) != 1 || source.calledWith[0] != "data/proxies/webshare-02.txt" {
-		t.Fatalf("ImportFile calls=%v", source.calledWith)
+	want := filepath.Join(os.Getenv("NLWPROXY_HOME"), "data", "proxies", "webshare-02.txt")
+	if len(source.calledWith) != 1 || source.calledWith[0] != want {
+		t.Fatalf("ImportFile calls=%v want=%q", source.calledWith, want)
 	}
 	if m.importing {
 		t.Fatal("import mode still active after Enter")

@@ -22,21 +22,56 @@
 
 ## Install
 
-Build the binary from source:
+Clone the repository and run the installer from inside it.
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/Groxzzl/NlwProxy.git
+cd NlwProxy
+.\install.ps1
+```
+
+If PowerShell blocks local scripts, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/Groxzzl/NlwProxy.git
+cd NlwProxy
+chmod +x install.sh
+./install.sh
+```
+
+The installer builds NLW Proxy, installs the binary into your user PATH, and creates the persistent user directories for config, profiles, and proxy files.
+
+Before the first run, set the provider key and the local token that clients will use to authenticate to NLW Proxy:
+
+```powershell
+setx MYPROVIDER_API_KEY "your-provider-api-key"
+setx NLW_PROXY_LOCAL_TOKEN "choose-a-local-gateway-token"
+```
+
+Open a **new terminal** after installation and setting the variables, then run:
+
+```bash
+nlwproxy
+```
+
+Running `nlwproxy` with no arguments launches the live dashboard from any working directory.
+
+### Manual build
 
 ```bash
 go build -trimpath -o nlwproxy ./cmd/nlwproxy
+./nlwproxy install
 ```
 
-On Windows, the output will be `nlwproxy.exe`.
-
-Then put it on your `PATH` so you can run `nlwproxy` from anywhere:
-
-```bash
-nlwproxy install
-```
-
-> **Default behavior:** running `nlwproxy` with no arguments launches the live dashboard.
+On Windows, run the manual binary as `.\nlwproxy.exe install`.
 
 ## Project Structure
 
