@@ -232,12 +232,20 @@ func (m OperationsRequests) View() string {
 	if m.ErrorsOnly {
 		filter = "errors"
 	}
-	rows := []string{Title("Requests", "metadata only — no prompt or response content"), fmt.Sprintf("FILTER %s  SORT %s  [e] errors  [s] sort", filter, m.Sort), header.Render("TIME     MODEL          ROUTE       TOKENS   TTFT     LATENCY  STATUS")}
+	rows := []string{Title("Requests", "metadata only — no prompt or response content"), fmt.Sprintf("FILTER %s  SORT %s  [e] errors  [s] sort", filter, m.Sort), header.Render("TIME     MODEL          PROXY       GEO          TOKENS   TTFT     LATENCY  STATUS")}
 	for _, e := range m.events() {
-		rows = append(rows, fmt.Sprintf("%-8s %-14s %-11s %6d   %-8s %-8s %s",
+		geo := e.ProxyCountry
+		if geo == "" {
+			geo = "—"
+		}
+		if e.ProxyCity != "" {
+			geo += "/" + e.ProxyCity
+		}
+		rows = append(rows, fmt.Sprintf("%-8s %-14s %-11s %-12s %6d   %-8s %-8s %s",
 			e.StartedAt.Format("15:04:05"),
 			clip(e.RequestedModel, 14),
-			clip(e.RouteID, 11),
+			clip(e.ProxyID, 11),
+			clip(geo, 12),
 			e.TotalTokens,
 			duration(e.TTFT),
 			duration(e.Duration),
@@ -273,7 +281,7 @@ func (m Logs) Update(msg tea.Msg) (Logs, tea.Cmd) {
 	return m, nil
 }
 func (m Logs) View() string {
-	rows := []string{Title("Logs", "operational lifecycle events"), header.Render("TIME     LEVEL  MODEL          ROUTE       EVENT")}
+	rows := []string{Title("Logs", "operational lifecycle events"), header.Render("TIME     LEVEL  MODEL          PROXY       GEO          EVENT")}
 	recent := snapshot(m.Source).Recent
 	for i := len(recent) - 1; i >= 0; i-- {
 		e := recent[i]
@@ -290,7 +298,14 @@ func (m Logs) View() string {
 			styled = warn.Render("WARN ")
 		}
 		_ = level
-		rows = append(rows, fmt.Sprintf("%-8s %-6s %-14s %-11s %s", e.StartedAt.Format("15:04:05"), styled, clip(e.RequestedModel, 14), clip(e.RouteID, 11), event))
+		geo := e.ProxyCountry
+		if geo == "" {
+			geo = "—"
+		}
+		if e.ProxyCity != "" {
+			geo += "/" + e.ProxyCity
+		}
+		rows = append(rows, fmt.Sprintf("%-8s %-6s %-14s %-11s %-12s %s", e.StartedAt.Format("15:04:05"), styled, clip(e.RequestedModel, 14), clip(e.ProxyID, 11), clip(geo, 12), event))
 	}
 	if len(recent) == 0 {
 		rows = append(rows, muted.Render("No events yet."))

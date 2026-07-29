@@ -193,6 +193,8 @@ You can add proxies in either place:
 
 Press `t` on the Proxies page to run the health test. Only working proxies are loaded into the runtime route pool.
 
+Health results, latency, location, and check time are stored in the user data directory. A fresh result remains valid for six hours, so restarting NLW Proxy does not repeat the full test. Pressing `t` ignores the cache and runs the test again.
+
 NLW Proxy does not scrape public lists during normal startup. Set `NLWPROXY_SCRAPE_PUBLIC=1` only if you want the dashboard startup path to refresh `github-auto.txt`. Entries still need to pass the health test before the runtime uses them.
 
 The repository also includes a stricter maintenance tool. It checks TLS connectivity and then requests the OpenCode model catalog through each proxy:

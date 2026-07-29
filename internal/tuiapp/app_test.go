@@ -31,8 +31,23 @@ func (s *proxySource) bump() { s.rev++ }
 func (s *proxySource) List() []proxymanager.ProxyEntry {
 	return append([]proxymanager.ProxyEntry(nil), s.entries...)
 }
-func (s *proxySource) Count() (int, int)                 { return len(s.entries), 0 }
-func (s *proxySource) Stats() proxymanager.Stats         { return proxymanager.Stats{Total: len(s.entries)} }
+func (s *proxySource) Count() (int, int) { return len(s.entries), 0 }
+func (s *proxySource) Stats() proxymanager.Stats {
+	stats := proxymanager.Stats{Total: len(s.entries)}
+	for _, entry := range s.entries {
+		if !entry.Alive {
+			stats.Dead++
+			continue
+		}
+		stats.Alive++
+		if entry.Latency >= 2*time.Second {
+			stats.Slow++
+		} else {
+			stats.Healthy++
+		}
+	}
+	return stats
+}
 func (s *proxySource) ImportFile(string) (int, []string) { return 0, nil }
 func (s *proxySource) TestSingle(context.Context, string, string) proxymanager.TestResult {
 	return proxymanager.TestResult{}
@@ -88,7 +103,7 @@ func TestProxyOnlyDashboardAndLockedSettings(t *testing.T) {
 	model.snapshot = Snapshot{Status: "ONLINE", ProxyOnly: true, HealthyProxies: 1, ActiveProxy: "127.0.0.1:9000", ProxyCountry: "United States"}
 	model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
 	view := model.View()
-	for _, want := range []string{"PROXY ONLY", "DIRECT BLOCKED", "Healthy proxies", "127.0.0.1:9000", "United States"} {
+	for _, want := range []string{"PROXY ONLY", "DIRECT BLOCKED", "1 HEALTHY", "Active routes", "United States"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("dashboard missing %q:\n%s", want, view)
 		}
@@ -107,8 +122,8 @@ func TestProxyOnlyDashboardShowsNoHealthyError(t *testing.T) {
 	model := New(context.Background(), nil)
 	model.snapshot = Snapshot{Status: "ONLINE", ProxyOnly: true, HealthyProxies: 0}
 	model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: 100, Height: 24})
-	if view := model.View(); !strings.Contains(view, "NO HEALTHY PROXIES") {
-		t.Fatalf("missing no-healthy error:\n%s", view)
+	if view := model.View(); !strings.Contains(view, "NO ACTIVE PROXY ROUTES") {
+		t.Fatalf("missing no-route error:\n%s", view)
 	}
 }
 
@@ -149,6 +164,42 @@ func TestWindowResizeChangesResponsiveLayout(t *testing.T) {
 	}
 	if got := lipgloss.Width(narrow); got != 54 {
 		t.Fatalf("narrow render width=%d", got)
+	}
+}
+
+func TestTallProxyPageCannotMoveSidebarOrStatusBar(t *testing.T) {
+	source := newProxySource(1000)
+	for i := range source.entries {
+		source.entries[i].Alive = true
+		source.entries[i].Latency = 100 * time.Millisecond
+	}
+	model := New(context.Background(), nil)
+	model.operations = source
+	model.proxiesPage = pages.NewProxiesPage(source)
+	model.active, model.selected, model.focus = PageProxies, int(PageProxies), focusContent
+	model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
+	view := model.View()
+	if got := lipgloss.Height(view); got != 30 {
+		t.Fatalf("render height=%d want=30", got)
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) != 30 || !strings.Contains(lines[4], "Overview") || !strings.Contains(lines[len(lines)-1], "127.0.0.1") && !strings.Contains(lines[len(lines)-1], "gateway offline") {
+		t.Fatalf("shell anchors moved:\n%s", view)
+	}
+}
+
+func TestOverviewUsesLiveProxyHealthComposition(t *testing.T) {
+	source := newProxySource(4)
+	source.entries[0].Alive, source.entries[0].Latency = true, 100*time.Millisecond
+	source.entries[1].Alive, source.entries[1].Latency = true, 3*time.Second
+	model := New(context.Background(), nil)
+	model.operations = source
+	model.proxiesPage = pages.NewProxiesPage(source)
+	model.snapshot = Snapshot{Status: "ONLINE", Connections: 2}
+	model.refreshOverviewDash()
+	data := model.overviewDash.Data
+	if data.Total != 4 || data.Healthy != 1 || data.Slow != 1 || data.Dead != 2 || data.ActiveRoutes != 2 {
+		t.Fatalf("overview health=%+v", data)
 	}
 }
 

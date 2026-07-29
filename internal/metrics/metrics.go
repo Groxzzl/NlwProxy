@@ -40,6 +40,10 @@ type Request struct {
 	RetryCount     int           `json:"retry_count,omitempty"`
 	ErrorCode      string        `json:"error_code,omitempty"`
 	State          RequestState  `json:"state"`
+	ProxyID        string        `json:"proxy_id,omitempty"`
+	ProxyCountry   string        `json:"proxy_country,omitempty"`
+	ProxyCity      string        `json:"proxy_city,omitempty"`
+	ProxyASN       string        `json:"proxy_asn,omitempty"`
 	Prompt         string        `json:"-"`
 	Response       string        `json:"-"`
 }

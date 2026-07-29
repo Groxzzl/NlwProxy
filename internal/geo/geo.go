@@ -32,11 +32,12 @@ type cacheEntry struct {
 
 // Service provides cached IP geolocation.
 type Service struct {
-	mu     sync.RWMutex
-	cache  map[string]cacheEntry
-	ttl    time.Duration
-	client *http.Client
-	url    string
+	mu       sync.RWMutex
+	cache    map[string]cacheEntry
+	ttl      time.Duration
+	client   *http.Client
+	url      string
+	fallback string
 }
 
 // Option configures the geo service.
@@ -60,10 +61,11 @@ func WithHTTPClient(c *http.Client) Option {
 // Uses ip-api.com free JSON endpoint; no API key required for <=45 req/min.
 func New(opts ...Option) *Service {
 	s := &Service{
-		cache:  map[string]cacheEntry{},
-		ttl:    30 * time.Minute,
-		client: &http.Client{Timeout: 5 * time.Second},
-		url:    "http://ip-api.com/json/",
+		cache:    map[string]cacheEntry{},
+		ttl:      6 * time.Hour,
+		client:   &http.Client{Timeout: 5 * time.Second},
+		url:      "http://ip-api.com/json/",
+		fallback: "https://ipwho.is/",
 	}
 	for _, o := range opts {
 		o(s)
@@ -152,15 +154,13 @@ func (s *Service) fetch(ctx context.Context, ip string) Result {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		r.Error = err.Error()
-		return r
+		return s.fetchFallback(ctx, ip, err.Error())
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
-		r.Error = err.Error()
-		return r
+		return s.fetchFallback(ctx, ip, err.Error())
 	}
 
 	var payload struct {
@@ -175,13 +175,11 @@ func (s *Service) fetch(ctx context.Context, ip string) Result {
 		Query   string  `json:"query"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		r.Error = fmt.Sprintf("decode error: %v", err)
-		return r
+		return s.fetchFallback(ctx, ip, fmt.Sprintf("decode error: %v", err))
 	}
 
 	if payload.Status != "success" {
-		r.Error = fmt.Sprintf("ip-api status: %s", payload.Status)
-		return r
+		return s.fetchFallback(ctx, ip, fmt.Sprintf("ip-api status: %s", payload.Status))
 	}
 
 	r.IP = payload.Query
@@ -192,5 +190,45 @@ func (s *Service) fetch(ctx context.Context, ip string) Result {
 	r.Org = payload.Org
 	r.Lat = payload.Lat
 	r.Lon = payload.Lon
+	return r
+}
+
+func (s *Service) fetchFallback(ctx context.Context, ip, primaryError string) Result {
+	r := Result{IP: ip, CheckedAt: time.Now(), Error: primaryError}
+	if s.fallback == "" {
+		return r
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.fallback+ip, nil)
+	if err != nil {
+		return r
+	}
+	req.Header.Set("User-Agent", "NlwProxy/1.0")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return r
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Success    bool    `json:"success"`
+		IP         string  `json:"ip"`
+		Country    string  `json:"country"`
+		City       string  `json:"city"`
+		Latitude   float64 `json:"latitude"`
+		Longitude  float64 `json:"longitude"`
+		Connection struct {
+			ASN      int `json:"asn"`
+			Org, ISP string
+		} `json:"connection"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload); err != nil || !payload.Success {
+		return r
+	}
+	r.Error = ""
+	r.IP, r.Country, r.City = payload.IP, payload.Country, payload.City
+	r.Lat, r.Lon = payload.Latitude, payload.Longitude
+	if payload.Connection.ASN > 0 {
+		r.ASN = fmt.Sprintf("AS%d", payload.Connection.ASN)
+	}
+	r.Org, r.ISP = payload.Connection.Org, payload.Connection.ISP
 	return r
 }

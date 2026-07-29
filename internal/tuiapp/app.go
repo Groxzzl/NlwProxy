@@ -333,6 +333,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		if m.active == PageProxies {
 			m.proxiesPage, _ = m.proxiesPage.Update(msg)
+			m.refreshOverviewDash()
 		}
 	}
 	return m, nil
@@ -363,7 +364,7 @@ func (m Model) View() string {
 		)
 	}
 	status := m.statusBar(width)
-	view := lipgloss.NewStyle().Background(m.theme.Background).Width(width).Height(height).Render(
+	view := lipgloss.NewStyle().Background(m.theme.Background).Width(width).Height(height).MaxHeight(height).Render(
 		lipgloss.JoinVertical(lipgloss.Left, body, status),
 	)
 	if m.frozen {
@@ -499,6 +500,7 @@ func (m *Model) refreshOverviewDash() {
 		InputTokens:  m.snapshot.InputTokens,
 		OutputTokens: m.snapshot.OutputTokens,
 		ExitCountry:  m.snapshot.ProxyCountry,
+		ActiveRoutes: m.snapshot.Connections,
 	}
 	if m.snapshot.ActiveProxy != "" {
 		data.ExitIP = m.snapshot.ActiveProxy
@@ -507,13 +509,11 @@ func (m *Model) refreshOverviewDash() {
 	// back to the healthy count carried on the snapshot.
 	data.Healthy = m.snapshot.HealthyProxies
 	if src := m.proxiesPage.Source; src != nil {
-		total, alive := src.Count()
-		if alive > 0 {
-			data.Healthy = alive
-		}
-		if dead := total - alive; dead > 0 {
-			data.Dead = dead
-		}
+		stats := src.Stats()
+		data.Total = stats.Total
+		data.Healthy = stats.Healthy
+		data.Slow = stats.Slow
+		data.Dead = stats.Dead
 	}
 	if m.operations != nil {
 		s := m.operations.Snapshot()
@@ -554,17 +554,9 @@ func (m Model) operationalView() string {
 	case PageOverview:
 		view := m.overviewDash.View()
 		if m.snapshot.ProxyOnly {
-			proxy := m.snapshot.ActiveProxy
-			if proxy == "" {
-				proxy = "—"
-			}
-			country := m.snapshot.ProxyCountry
-			if country == "" {
-				country = "—"
-			}
-			status := fmt.Sprintf("PROXY ONLY  •  DIRECT BLOCKED\nHealthy proxies  %d\nActive proxy     %s\nCountry          %s", m.snapshot.HealthyProxies, proxy, country)
-			if m.snapshot.HealthyProxies == 0 {
-				status += "\nNO HEALTHY PROXIES — outbound requests are blocked"
+			status := "PROXY ONLY  •  DIRECT BLOCKED"
+			if m.snapshot.Connections == 0 {
+				status += "  •  NO ACTIVE PROXY ROUTES"
 			}
 			view = status + "\n\n" + view
 		}
@@ -587,7 +579,7 @@ func (m Model) operationalView() string {
 
 func (m Model) content(width, height int) string {
 	if operational := m.operationalView(); operational != "" {
-		return lipgloss.NewStyle().Width(width).Height(height).Padding(1, 2).Background(m.theme.Background).Render(operational)
+		return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Padding(1, 2).Background(m.theme.Background).Render(operational)
 	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Text).Render(m.active.String())
 	description := pageDescription(m.active)

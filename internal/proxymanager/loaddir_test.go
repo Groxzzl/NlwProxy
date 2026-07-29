@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"nlwproxy/internal/geo"
 )
 
 func writeFile(t *testing.T, path, content string) {
@@ -81,6 +84,44 @@ func TestLoadDirCreatesMissingDir(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); err != nil {
 		t.Fatalf("LoadDir did not create dir: %v", err)
+	}
+}
+
+func TestRestoreJSONRestoresFreshHealthAndGeo(t *testing.T) {
+	dir := t.TempDir()
+	proxyFile := filepath.Join(dir, "pool.txt")
+	writeFile(t, proxyFile, "1.1.1.1:8080\n")
+	now := time.Now().UTC().Truncate(time.Second)
+	cache := filepath.Join(dir, "proxies.json")
+	saved := []persistedProxy{{Host: "1.1.1.1", Port: 8080, Scheme: SchemeHTTP, CheckedAt: now.Add(-time.Hour), Latency: 420 * time.Millisecond, Alive: true, Geo: geo.Result{Country: "Singapore", City: "Singapore", ASN: "AS1"}}}
+	data, _ := json.Marshal(saved)
+	writeFile(t, cache, string(data))
+	m := New(nil)
+	if _, errs := m.LoadDir(dir); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	restored, err := m.RestoreJSON(cache, 6*time.Hour, now)
+	if err != nil || restored != 1 {
+		t.Fatalf("restored=%d err=%v", restored, err)
+	}
+	e := m.List()[0]
+	if !e.Alive || e.Latency != 420*time.Millisecond || e.Geo.Country != "Singapore" || !e.CheckedAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("entry not restored: %+v", e)
+	}
+}
+
+func TestRestoreJSONSkipsExpiredHealth(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pool.txt"), "1.1.1.1:8080\n")
+	now := time.Now().UTC()
+	data, _ := json.Marshal([]persistedProxy{{Host: "1.1.1.1", Port: 8080, CheckedAt: now.Add(-7 * time.Hour), Alive: true}})
+	cache := filepath.Join(dir, "proxies.json")
+	writeFile(t, cache, string(data))
+	m := New(nil)
+	_, _ = m.LoadDir(dir)
+	restored, err := m.RestoreJSON(cache, 6*time.Hour, now)
+	if err != nil || restored != 0 || m.List()[0].Alive {
+		t.Fatalf("expired cache restored: restored=%d err=%v entry=%+v", restored, err, m.List()[0])
 	}
 }
 

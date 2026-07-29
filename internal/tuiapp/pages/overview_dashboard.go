@@ -22,7 +22,7 @@ type OverviewDashboardData struct {
 	LocalKeyName string
 
 	// Health composition.
-	Healthy, Slow, Dead, Cooldown int
+	Total, Healthy, Slow, Dead, Cooldown, ActiveRoutes int
 
 	// Traffic.
 	Requests, Errors          int64
@@ -123,7 +123,6 @@ func (m OverviewDashboard) quickConnectCard(width int) string {
 }
 
 func (m OverviewDashboard) healthCard(width int) string {
-	total := m.Data.Healthy + m.Data.Slow + m.Data.Dead + m.Data.Cooldown
 	barW := max(8, width-6)
 	bar := ui.SegmentBar([]ui.Segment{
 		{Count: m.Data.Healthy, Kind: ui.KindHealthy},
@@ -137,7 +136,8 @@ func (m OverviewDashboard) healthCard(width int) string {
 		ui.BadgeGlyph(ui.KindGlyph(ui.KindDead), fmt.Sprintf("%d dead", m.Data.Dead), ui.KindDead),
 		ui.BadgeGlyph(ui.KindGlyph(ui.KindCooldown), fmt.Sprintf("%d cooldown", m.Data.Cooldown), ui.KindCooldown),
 	}, "  ")
-	body := bar + "\n" + pills + "\n" + ui.StyleMuted.Render(fmt.Sprintf("%d proxies tracked", total))
+	counts := ui.StyleMuted.Render(fmt.Sprintf("Total %d   Active routes %d", m.Data.Total, m.Data.ActiveRoutes))
+	body := bar + "\n" + pills + "\n" + counts
 	return ui.Card("HEALTH", body, width, ui.ColorAccent)
 }
 

@@ -71,6 +71,28 @@ func TestRequestsFiltersAndSorts(t *testing.T) {
 	}
 }
 
+func TestRequestsAndLogsRenderProxyGeo(t *testing.T) {
+	data := fixtureOperations()
+	data.Recent[0].ProxyID = "proxy-7"
+	data.Recent[0].ProxyCountry = "Singapore"
+	data.Recent[0].ProxyCity = "Singapore"
+	source := operationsStub{data}
+	requests := NewOperationsRequests(source)
+	requests.SetSize(140, 30)
+	for _, want := range []string{"PROXY", "GEO", "proxy-7", "Singapore"} {
+		if view := requests.View(); !strings.Contains(view, want) {
+			t.Fatalf("requests missing %q:\n%s", want, view)
+		}
+	}
+	logs := NewLogs(source)
+	logs.SetSize(140, 30)
+	for _, want := range []string{"PROXY", "GEO", "proxy-7", "Singapore"} {
+		if view := logs.View(); !strings.Contains(view, want) {
+			t.Fatalf("logs missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestLogsRenderSeverityAndMetadata(t *testing.T) {
 	m := NewLogs(operationsStub{fixtureOperations()})
 	m.SetSize(90, 20)

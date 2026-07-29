@@ -414,6 +414,9 @@ func (m *Manager) LookupGeo(ctx context.Context) {
 type Stats struct {
 	Total     int
 	Alive     int
+	Healthy   int
+	Slow      int
+	Dead      int
 	HTTP      int
 	HTTPS     int
 	SOCKS5    int
@@ -428,6 +431,13 @@ func (m *Manager) Stats() Stats {
 	for _, e := range entries {
 		if e.Alive {
 			s.Alive++
+			if e.Latency >= 2*time.Second {
+				s.Slow++
+			} else {
+				s.Healthy++
+			}
+		} else {
+			s.Dead++
 		}
 		switch e.Scheme {
 		case SchemeHTTP:

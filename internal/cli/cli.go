@@ -90,14 +90,9 @@ func homeDir() string {
 	return filepath.Join(d, "nlwproxy")
 }
 
-// defaultProfilesDir returns the profiles directory under the home dir, falling
-// back to a local ./profiles when it already exists (developer checkout).
-func defaultProfilesDir() string {
-	if fi, err := os.Stat("profiles"); err == nil && fi.IsDir() {
-		return "profiles"
-	}
-	return filepath.Join(homeDir(), "profiles")
-}
+// defaultProfilesDir always uses the persistent user home. Set
+// NLWPROXY_HOME for a separate development or portable profile store.
+func defaultProfilesDir() string { return filepath.Join(homeDir(), "profiles") }
 
 func Run(args []string, out, errOut io.Writer) int {
 	// No arguments → launch the dashboard TUI directly, so users can just type

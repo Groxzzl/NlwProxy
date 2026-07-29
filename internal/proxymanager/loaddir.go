@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"nlwproxy/internal/geo"
 )
 
 // proxyKey is the dedup key for a proxy: host:port (case-insensitive host).
@@ -113,30 +115,77 @@ func (m *Manager) LoadDir(dir string) (added int, errors []string) {
 // persistedProxy is the on-disk JSON shape. Passwords are included: this is
 // local user data, not a shared secret store.
 type persistedProxy struct {
-	ID       string      `json:"id"`
-	Host     string      `json:"host"`
-	Port     int         `json:"port"`
-	Scheme   ProxyScheme `json:"scheme"`
-	Username string      `json:"username,omitempty"`
-	Password string      `json:"password,omitempty"`
-	Label    string      `json:"label,omitempty"`
-	Source   string      `json:"source,omitempty"`
+	ID        string        `json:"id"`
+	Host      string        `json:"host"`
+	Port      int           `json:"port"`
+	Scheme    ProxyScheme   `json:"scheme"`
+	Username  string        `json:"username,omitempty"`
+	Password  string        `json:"password,omitempty"`
+	Label     string        `json:"label,omitempty"`
+	Source    string        `json:"source,omitempty"`
+	CheckedAt time.Time     `json:"checked_at,omitempty"`
+	Latency   time.Duration `json:"latency_ns,omitempty"`
+	Alive     bool          `json:"alive"`
+	Error     string        `json:"error,omitempty"`
+	Geo       geo.Result    `json:"geo,omitempty"`
 }
 
-// SaveJSON persists the merged proxy set to path as JSON, including passwords.
+// RestoreJSON merges cached health and geo fields into proxies already loaded
+// from text files. Addresses and credentials continue to come from the text
+// files, so a stale cache cannot re-introduce a removed proxy.
+func (m *Manager) RestoreJSON(path string, maxAge time.Duration, now time.Time) (restored int, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var saved []persistedProxy
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return 0, err
+	}
+	byKey := make(map[string]persistedProxy, len(saved))
+	for _, item := range saved {
+		byKey[proxyKey(item.Host, item.Port)] = item
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entry := range m.entries {
+		item, ok := byKey[proxyKey(entry.Host, entry.Port)]
+		if !ok || item.CheckedAt.IsZero() || (maxAge > 0 && now.Sub(item.CheckedAt) > maxAge) {
+			continue
+		}
+		entry.CheckedAt = item.CheckedAt
+		entry.Latency = item.Latency
+		entry.Alive = item.Alive
+		entry.Error = item.Error
+		entry.Geo = item.Geo
+		restored++
+	}
+	return restored, nil
+}
+
+// SaveJSON persists the merged proxy set to path, including local proxy
+// credentials. It writes atomically and uses owner-only permissions.
 func (m *Manager) SaveJSON(path string) error {
 	m.mu.RLock()
 	out := make([]persistedProxy, 0, len(m.entries))
 	for _, e := range m.entries {
 		out = append(out, persistedProxy{
-			ID:       e.ID,
-			Host:     e.Host,
-			Port:     e.Port,
-			Scheme:   e.Scheme,
-			Username: e.Username,
-			Password: e.Password,
-			Label:    e.Label,
-			Source:   e.Source,
+			ID:        e.ID,
+			Host:      e.Host,
+			Port:      e.Port,
+			Scheme:    e.Scheme,
+			Username:  e.Username,
+			Password:  e.Password,
+			Label:     e.Label,
+			Source:    e.Source,
+			CheckedAt: e.CheckedAt,
+			Latency:   e.Latency,
+			Alive:     e.Alive,
+			Error:     e.Error,
+			Geo:       e.Geo,
 		})
 	}
 	m.mu.RUnlock()
@@ -153,5 +202,9 @@ func (m *Manager) SaveJSON(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return atomicReplace(tmp, path)
 }

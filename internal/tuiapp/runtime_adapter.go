@@ -28,6 +28,7 @@ type RuntimeAdapter struct {
 	proxies    *proxymanager.Manager
 	dataDir    string
 	importOnce sync.Once
+	mu         sync.Mutex
 }
 
 func NewRuntimeAdapter(runtime *gatewayruntime.GatewayRuntime) *RuntimeAdapter {
@@ -36,20 +37,16 @@ func NewRuntimeAdapter(runtime *gatewayruntime.GatewayRuntime) *RuntimeAdapter {
 	a.proxies = proxymanager.New(nil)
 	a.ops = &operationsSource{adapter: a}
 	a.store = NewStore(runtime.Events(), a.snapshot())
-	a.proxies.SetAliveListener(func(entries []proxymanager.ProxyEntry) {
-		_ = runtime.ReloadHealthyProxies(entries)
+	a.proxies.SetAliveListener(func([]proxymanager.ProxyEntry) {
+		_ = a.applyProxyState()
 	})
 	return a
 }
 
-// resolveDataDir returns the directory that holds proxy files. It prefers a
-// local ./data (developer checkout) and otherwise uses the per-user home dir
-// (%APPDATA%\nlwproxy\data or ~/.config/nlwproxy/data, overridable via
-// NLWPROXY_HOME), so `nlwproxy` finds the same proxies from any working dir.
+// resolveDataDir returns the persistent per-user data directory regardless of
+// the current working directory. NLWPROXY_HOME is the explicit override for
+// development and portable installs.
 func resolveDataDir() string {
-	if fi, err := os.Stat("data"); err == nil && fi.IsDir() {
-		return "data"
-	}
 	if h := os.Getenv("NLWPROXY_HOME"); h != "" {
 		return filepath.Join(h, "data")
 	}
@@ -73,7 +70,12 @@ type proxyManagerSource struct {
 	reload func(context.Context) error
 }
 
-func (s proxyManagerSource) Reload(ctx context.Context) error { return s.reload(ctx) }
+func (s proxyManagerSource) Reload(ctx context.Context) error {
+	if s.reload == nil {
+		return nil
+	}
+	return s.reload(ctx)
+}
 func (a *RuntimeAdapter) Start(ctx context.Context) error {
 	a.importOnce.Do(func() {
 		// Public scraping is opt-in. A verified local pool must not be mixed with
@@ -120,19 +122,19 @@ func (a *RuntimeAdapter) Start(ctx context.Context) error {
 				}
 			}
 		}
-		// Re-test imported entries at startup so proxy-only mode has usable routes
-		// without requiring the user to open the Proxies page and press T first.
-		testCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		_ = a.proxies.TestAll(testCtx, "https://www.cloudflare.com/cdn-cgi/trace")
-		cancel()
-		alive := a.proxies.ListAlive()
-		sort.SliceStable(alive, func(i, j int) bool { return alive[i].Latency < alive[j].Latency })
-		const maxActiveRoutes = 120
-		if len(alive) > maxActiveRoutes {
-			alive = alive[:maxActiveRoutes]
+		cachePath := filepath.Join(a.dataDir, "proxies.json")
+		const healthCacheTTL = 6 * time.Hour
+		restored, _ := a.proxies.RestoreJSON(cachePath, healthCacheTTL, time.Now())
+		total, _ := a.proxies.Count()
+		// Only test on startup when no fresh cache entries exist. Fresh saved
+		// results are restored immediately; new/uncached entries stay inactive
+		// until the user presses T for an explicit refresh.
+		if total > 0 && restored == 0 {
+			testCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			_ = a.proxies.TestAll(testCtx, "https://www.cloudflare.com/cdn-cgi/trace")
+			cancel()
 		}
-		_ = a.runtime.ReloadHealthyProxies(alive)
-		_ = a.proxies.SaveJSON(filepath.Join(a.dataDir, "proxies.json"))
+		_ = a.applyProxyState()
 	})
 	if err := a.runtime.Start(ctx); err != nil {
 		a.store.Set(a.snapshot())
@@ -147,21 +149,54 @@ func (a *RuntimeAdapter) Stop(ctx context.Context) error {
 	return err
 }
 
-// Reload applies the newly tested healthy proxy set to the managed runtime.
-func (a *RuntimeAdapter) Reload(ctx context.Context) error {
-	if err := a.runtime.Stop(ctx); err != nil {
+func (a *RuntimeAdapter) applyProxyState() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	alive := a.proxies.ListAlive()
+	sort.SliceStable(alive, func(i, j int) bool { return alive[i].Latency < alive[j].Latency })
+	const maxActiveRoutes = 120
+	if len(alive) > maxActiveRoutes {
+		alive = alive[:maxActiveRoutes]
+	}
+	if err := a.runtime.ReloadHealthyProxies(alive); err != nil {
 		return err
 	}
-	if err := a.runtime.Start(ctx); err != nil {
+	if err := a.proxies.SaveJSON(filepath.Join(a.dataDir, "proxies.json")); err != nil {
 		return err
 	}
 	a.store.Set(a.snapshot())
 	return nil
 }
 
+// Reload persists freshly tested proxy state and hot-reloads the selector. It
+// does not restart the listener, so in-memory request telemetry remains intact.
+func (a *RuntimeAdapter) Reload(context.Context) error { return a.applyProxyState() }
+
 func (a *RuntimeAdapter) dashboardSnapshot() dashboard.Snapshot {
 	raw := a.runtime.Snapshot()
-	return a.dash.Update(time.Now(), raw.Metrics, raw.Routes)
+	metricsSnapshot := raw.Metrics
+	entries := a.proxies.List()
+	byID := make(map[string]proxymanager.ProxyEntry, len(entries))
+	for _, entry := range entries {
+		byID[entry.ID] = entry
+	}
+	for i := range metricsSnapshot.Events {
+		event := &metricsSnapshot.Events[i]
+		at := strings.LastIndex(event.RouteID, "@")
+		if at < 0 {
+			continue
+		}
+		proxyID := event.RouteID[at+1:]
+		entry, ok := byID[proxyID]
+		if !ok {
+			continue
+		}
+		event.ProxyID = proxyID
+		event.ProxyCountry = entry.Geo.Country
+		event.ProxyCity = entry.Geo.City
+		event.ProxyASN = entry.Geo.ASN
+	}
+	return a.dash.Update(time.Now(), metricsSnapshot, raw.Routes)
 }
 
 func (a *RuntimeAdapter) snapshot() Snapshot {
@@ -173,9 +208,9 @@ func (a *RuntimeAdapter) snapshot() Snapshot {
 	if raw.State == "running" {
 		status = "ONLINE"
 	}
-	dash := a.dash.Update(time.Now(), raw.Metrics, raw.Routes)
-	_, healthy := a.proxies.Count()
-	result := Snapshot{Profile: raw.Profile.Name, Gateway: "http://" + raw.Listen + "/v1", Status: status, Notice: raw.Error, Requests: dash.Global.Total, Errors: dash.Global.Errors, Active: dash.Global.Active, Connections: len(raw.Routes), Models: len(dash.Models), InputTokens: dash.Global.InputTokens, OutputTokens: dash.Global.OutputTokens, ProxyOnly: strings.EqualFold(raw.Profile.ID, "reffaunlimited"), HealthyProxies: healthy}
+	dash := a.dashboardSnapshot()
+	proxyStats := a.proxies.Stats()
+	result := Snapshot{Profile: raw.Profile.Name, Gateway: "http://" + raw.Listen + "/v1", Status: status, Notice: raw.Error, Requests: dash.Global.Total, Errors: dash.Global.Errors, Active: dash.Global.Active, Connections: len(raw.Routes), Models: len(dash.Models), InputTokens: dash.Global.InputTokens, OutputTokens: dash.Global.OutputTokens, ProxyOnly: strings.EqualFold(raw.Profile.ID, "reffaunlimited"), HealthyProxies: proxyStats.Healthy}
 	if alive := a.proxies.ListAlive(); len(alive) > 0 {
 		result.ActiveProxy = fmt.Sprintf("%s:%d", alive[0].Host, alive[0].Port)
 		result.ProxyCountry = alive[0].Geo.Country
