@@ -1,7 +1,7 @@
-# Build artifacts
-nlwproxy
-nlwproxy.exe
-nlwproxy.exe~
+# Build artifacts (root binaries only; do not ignore cmd/nlwproxy source)
+/nlwproxy
+/nlwproxy.exe
+/nlwproxy.exe~
 /dist/
 *.exe
 *.exe~
