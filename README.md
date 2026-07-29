@@ -1,30 +1,34 @@
 # NLW Proxy
 
-**NLW Proxy** is a local, OpenAI-compatible gateway that sits between your AI coding client (OpenCode or Claude Code) and an upstream provider, and routes every outbound request through a rotating pool of HTTP/SOCKS5 proxies. Point your client at `http://127.0.0.1:8787/v1`, and NLW Proxy transparently forwards each request to your provider over a healthy proxy — round-robin across the pool, with automatic per-proxy cooldown when a proxy gets rate-limited (HTTP 429). It ships with a live Bubble Tea terminal dashboard so you can watch traffic, test proxies, and copy your connection details without leaving the terminal.
+NLW Proxy is a local OpenAI-compatible gateway for OpenCode and other clients that use the OpenAI API shape. It sends upstream requests through a pool of HTTP or SOCKS5 proxies and exposes a terminal dashboard for testing and managing that pool.
 
-## Features
+The gateway listens on `127.0.0.1:8787` by default. It does not expose itself to the local network unless you change the listen address.
 
-- **Proxy-only routing** — when `proxy_only` is enabled, no request ever leaves your machine without going through a proxy (fail-closed, no accidental direct connections).
-- **Round-robin rotation** — outbound requests are spread evenly across all healthy proxies.
-- **429 cooldown auto-rotate** — a proxy that returns `429 Too Many Requests` is put on cooldown and skipped; the request is retried on the next healthy proxy automatically.
-- **Multi-file proxy loader** — drop any number of `*.txt` proxy files into `data/proxies/`; all are auto-loaded on startup, deduplicated by `host:port`, and merged into one pool.
-- **Health testing** — test every proxy on demand and keep only the live ones in rotation.
-- **Geo / country per proxy** — each proxy is annotated with its exit IP country so you can see where traffic is coming out.
-- **Live TUI dashboard** — real-time pages for overview, proxies, routes, requests, models, logs, and settings.
-- **Copy-ready connection details** — the Overview page shows your Base URL and API-key env reference ready to paste into OpenCode / Claude Code.
+## What it does
+
+- Loads proxy lists from multiple text files.
+- Tests proxies before adding them to the active route pool.
+- Rotates healthy proxies with round-robin selection.
+- Moves a proxy into cooldown after an upstream `429` response.
+- Reads `Retry-After` and `retry-after-ms` when the provider includes them.
+- Blocks direct upstream connections when `proxy_only` is enabled.
+- Shows proxy health, latency, location, requests, models, routes, and logs in the TUI.
+- Stores API keys in environment variables rather than config files.
 
 ## Requirements
 
-- **Go 1.22+** — required to build from source.
-- **OS** — Windows, macOS, or Linux.
-- **A provider API key** — e.g. [OpenCode Zen](https://opencode.ai) (or any OpenAI-compatible upstream). The key is read from an environment variable, never stored in config.
-- **Proxies** — a list of HTTP/SOCKS5 proxies, e.g. from [Webshare](https://www.webshare.io). Authenticated `host:port:user:pass` proxies are recommended.
+- Go 1.22 or newer
+- Windows, Linux, or macOS
+- An API key for an OpenAI-compatible provider
+- HTTP or SOCKS5 proxies
+
+Authenticated proxies are preferable. Public proxy lists are volatile and often rate-limited already.
 
 ## Install
 
-Clone the repository and run the installer from inside it.
+### Windows
 
-### Windows (PowerShell)
+Open PowerShell:
 
 ```powershell
 git clone https://github.com/Groxzzl/NlwProxy.git
@@ -32,13 +36,15 @@ cd NlwProxy
 .\install.ps1
 ```
 
-If PowerShell blocks local scripts, use:
+If PowerShell blocks the script:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-### macOS / Linux
+The script builds `nlwproxy.exe`, copies it to `%LOCALAPPDATA%\nlwproxy\bin`, and adds that directory to your user PATH.
+
+### Linux and macOS
 
 ```bash
 git clone https://github.com/Groxzzl/NlwProxy.git
@@ -47,22 +53,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The installer builds NLW Proxy, installs the binary into your user PATH, and creates the persistent user directories for config, profiles, and proxy files.
-
-Before the first run, set the provider key and the local token that clients will use to authenticate to NLW Proxy:
-
-```powershell
-setx MYPROVIDER_API_KEY "your-provider-api-key"
-setx NLW_PROXY_LOCAL_TOKEN "choose-a-local-gateway-token"
-```
-
-Open a **new terminal** after installation and setting the variables, then run:
-
-```bash
-nlwproxy
-```
-
-Running `nlwproxy` with no arguments launches the live dashboard from any working directory.
+The script installs the binary under `~/.local/bin`.
 
 ### Manual build
 
@@ -71,51 +62,61 @@ go build -trimpath -o nlwproxy ./cmd/nlwproxy
 ./nlwproxy install
 ```
 
-On Windows, run the manual binary as `.\nlwproxy.exe install`.
+PowerShell requires the executable prefix:
 
-## Project Structure
-
-```
-NlwProxy/
-├── cmd/
-│   └── nlwproxy/            # main entrypoint (main.go) — CLI + dashboard bootstrap
-├── internal/
-│   ├── cli/                 # command parsing and subcommand dispatch
-│   ├── gateway/             # OpenAI-compatible HTTP server (binds 127.0.0.1:8787)
-│   ├── routing/             # upstream selection + strategy (round_robin / failover)
-│   ├── retry/               # 429 detection, cooldown, retry-on-next-proxy logic
-│   ├── proxymanager/        # proxy pool state, rotation, cooldown tracking
-│   ├── proxyimport/         # parse & load proxy files / dashboard imports
-│   ├── geo/                 # per-proxy exit-IP geo / country lookup
-│   ├── runtime/             # process runtime wiring and lifecycle
-│   ├── tuiapp/              # Bubble Tea dashboard application
-│   │   ├── pages/           # dashboard pages (overview, proxies, routes, requests, models…)
-│   │   └── ui/              # shared TUI styles and widgets
-│   └── …                    # config, health, metrics, security, transport, stream helpers
-├── data/
-│   └── proxies/             # drop your *.txt proxy files here (gitignored)
-│       └── EXAMPLE.txt.example
-├── profiles/                # saved runtime profiles (gitignored except index.example.json)
-├── nlwproxy.json            # active config
-└── nlwproxy.example.json    # template config to copy from
+```powershell
+go build -trimpath -o nlwproxy.exe ./cmd/nlwproxy
+.\nlwproxy.exe install
 ```
 
-Key `nlwproxy.json` fields at a glance:
+Open a new terminal after installation. Confirm that the command is available:
 
-- `server.local_token_env` — name of the env var holding the token clients must present.
-- `upstreams[].api_key_env` — name of the env var holding your provider API key.
-- `proxy_only` — when `true`, all traffic must go through a proxy.
-- `routing.strategy` — `round_robin` or `failover`.
+```powershell
+nlwproxy version
+```
+
+## First run
+
+The default config expects these environment variables:
+
+```powershell
+setx MYPROVIDER_API_KEY "your-provider-api-key"
+setx NLW_PROXY_LOCAL_TOKEN "choose-a-local-token"
+```
+
+Open a new terminal after running `setx`.
+
+`MYPROVIDER_API_KEY` is sent to the upstream provider. `NLW_PROXY_LOCAL_TOKEN` is the key local clients use when connecting to NLW Proxy.
+
+Start the dashboard:
+
+```powershell
+nlwproxy
+```
+
+The first run creates the user data directories automatically.
+
+Windows paths:
+
+```text
+%APPDATA%\nlwproxy\config.json
+%APPDATA%\nlwproxy\profiles\
+%APPDATA%\nlwproxy\data\proxies\
+```
+
+Linux and macOS paths:
+
+```text
+~/.config/nlwproxy/config.json
+~/.config/nlwproxy/profiles/
+~/.config/nlwproxy/data/proxies/
+```
+
+Set `NLWPROXY_HOME` if you want to use another directory.
 
 ## Configuration
 
-NLW Proxy is configured via `nlwproxy.json`. Copy the template to get started:
-
-```bash
-cp nlwproxy.example.json nlwproxy.json
-```
-
-Example config:
+The installer copies `nlwproxy.example.json` to the user config directory. The default file looks like this:
 
 ```json
 {
@@ -149,211 +150,278 @@ Example config:
 }
 ```
 
-| Field | Meaning |
+`local_token_env` and `api_key_env` contain environment variable names. Do not put real keys in the JSON file.
+
+| Field | Use |
 | --- | --- |
-| `server.listen` | Address the gateway binds to. Keep it `127.0.0.1` (localhost only). |
-| `server.local_token_env` | **Name** of the env var whose value clients send as their API key. |
-| `routing.strategy` | `round_robin` (default) or `failover`. |
-| `proxy_only` | `true` = fail-closed; never connect without a proxy. |
-| `upstreams[].base_url` | Your provider's OpenAI-compatible base URL. |
-| `upstreams[].api_key_env` | **Name** of the env var holding the provider API key. |
-| `upstreams[].priority` / `weight` | Ordering / weighting hints for routing. |
-| `upstreams[].enabled` | Toggle this upstream on/off. |
+| `server.listen` | Local address and port for the gateway |
+| `server.local_token_env` | Environment variable containing the local client token |
+| `routing.strategy` | `round_robin` or `failover` |
+| `proxy_only` | Blocks direct upstream traffic when set to `true` |
+| `upstreams[].base_url` | OpenAI-compatible provider base URL |
+| `upstreams[].api_key_env` | Environment variable containing the provider key |
+| `upstreams[].enabled` | Enables or disables the upstream |
 
-> **Important:** `api_key_env` and `local_token_env` hold **environment-variable names, not secrets**. NLW Proxy reads the actual key/token from the environment at runtime. This keeps credentials out of the config file and out of version control.
+## Add proxies
 
-### Setting the environment variables
+The persistent proxy directory is shown on the dashboard and printed by the installer.
 
-Set the provider key and the local gateway token. On **Windows** (persist with `setx`, then open a new terminal):
+Accepted line formats:
 
-```bat
-setx MYPROVIDER_API_KEY "sk-your-real-provider-key"
-setx NLW_PROXY_LOCAL_TOKEN "choose-a-strong-local-token"
+```text
+host:port
+host:port:username:password
+http://host:port
+http://username:password@host:port
+socks5://host:port
 ```
 
-On **macOS / Linux** (add to your shell profile):
+Example:
 
-```bash
-export MYPROVIDER_API_KEY="sk-your-real-provider-key"
-export NLW_PROXY_LOCAL_TOKEN="choose-a-strong-local-token"
-```
-
-- `MYPROVIDER_API_KEY` — the real key for your upstream provider (name must match `api_key_env`).
-- `NLW_PROXY_LOCAL_TOKEN` — the token your clients (OpenCode / Claude Code) send to the gateway (name must match `local_token_env`).
-
-## Adding Proxies
-
-You have two ways to load proxies:
-
-**1. Drop files into `data/proxies/`.** Create any number of `*.txt` files there. Every file is auto-loaded on startup, deduplicated by `host:port`, and merged. See [`data/proxies/EXAMPLE.txt.example`](data/proxies/EXAMPLE.txt.example) for the format:
-
-```
-# host:port
-# host:port:username:password        (authenticated — recommended)
-# http://host:port
-# http://username:password@host:port
-# socks5://host:port
+```text
 203.0.113.10:8080:user1:pass1
 203.0.113.11:8080:user1:pass1
 socks5://198.51.100.5:1080
 ```
 
-Lines starting with `#` and blank lines are ignored.
+Blank lines and lines beginning with `#` are ignored.
 
-**2. Import from the dashboard.** Open the **Proxies** page and press **`i`** to import.
+You can add proxies in either place:
 
-Once loaded:
+1. Copy one or more `.txt` files into the persistent proxy directory.
+2. Open the Proxies page, press `i`, and enter a file path.
 
-- Press **`t`** on the Proxies page to **health-test** every proxy.
-- **Only alive proxies enter the round-robin.** Dead proxies are excluded.
-- A proxy that returns **429** is put on **cooldown automatically** and skipped until it recovers.
+Press `t` on the Proxies page to run the health test. Only working proxies are loaded into the runtime route pool.
 
-## Running
-
-Launch the dashboard (default, no arguments):
-
-```bash
-nlwproxy
-```
-
-### Dashboard pages
-
-| Page | What it shows |
-| --- | --- |
-| **Overview** | Live status + **copy-ready Base URL** and **API-key reference** for your client. |
-| **Proxies** | The proxy pool — status, geo/country, cooldowns; test and import from here. |
-| **Routes** | Upstreams and the active routing strategy. |
-| **Requests** | Live request stream flowing through the gateway. |
-| **Models** | Models available from your upstream(s). |
-| **Logs** | Runtime logs. |
-| **Settings** | Configuration and runtime toggles. |
-
-### Key bindings
-
-| Key | Action |
-| --- | --- |
-| `Tab` | Move focus between panes |
-| `↑ ↓ ← →` | Navigate within a pane |
-| `Enter` | Open / select |
-| `/` | Search |
-| `t` | Health-test proxies |
-| `i` | Import proxies |
-| `f` | Freeze / pause live updates |
-| `q` | Quit |
-| `Ctrl+Shift+C` | Copy the selected connection detail |
+The program also fetches a capped list of public proxies on startup. These are supplementary. Delete `github-auto.txt` from the proxy directory if you do not want to use them.
 
 ## Connect OpenCode
 
-The gateway is OpenAI-compatible and served at **`http://127.0.0.1:8787/v1`**. Add it as a provider in your OpenCode config (`opencode.json`). Use your `NLW_PROXY_LOCAL_TOKEN` **value** as the API key:
+NLW Proxy exposes an OpenAI-compatible API at:
+
+```text
+http://127.0.0.1:8787/v1
+```
+
+Merge this provider into your OpenCode config:
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "provider": {
     "nlwproxy": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "NLW Proxy",
       "options": {
         "baseURL": "http://127.0.0.1:8787/v1",
-        "apiKey": "your-NLW_PROXY_LOCAL_TOKEN-value"
+        "apiKey": "{env:NLW_PROXY_LOCAL_TOKEN}"
       },
       "models": {
-        "your-model-id": {
-          "name": "Your Model"
+        "opencode-route": {
+          "name": "NLW managed route"
         }
       }
     }
-  }
+  },
+  "model": "nlwproxy/opencode-route"
 }
 ```
 
-Replace `your-model-id` with a model your upstream provider exposes (check the **Models** page in the dashboard).
+A copy is available at [`examples/opencode.jsonc`](examples/opencode.jsonc).
 
-## Connect Claude Code
+Start NLW Proxy before opening a model through OpenCode:
 
-Point Claude Code at the gateway via its `settings.json` `env` block. Use your `NLW_PROXY_LOCAL_TOKEN` **value** as the auth token:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/v1",
-    "ANTHROPIC_AUTH_TOKEN": "your-NLW_PROXY_LOCAL_TOKEN-value",
-    "ANTHROPIC_MODEL": "your-model-id"
-  }
-}
+```powershell
+nlwproxy
 ```
 
-## Generic OpenAI SDK Usage
+## Claude Code compatibility
 
-Any OpenAI-compatible SDK works — just point `base_url` / `baseURL` at the gateway and use your local token as the key.
+Claude Code sends requests to Anthropic's `/v1/messages` endpoint. NLW Proxy currently implements OpenAI-compatible `/v1/chat/completions` and `/v1/responses` endpoints, so Claude Code cannot connect directly yet.
 
-**Python:**
+Use OpenCode or another OpenAI-compatible client. Native Claude Code support requires an Anthropic request and response adapter.
+
+## OpenAI SDK
+
+Python:
 
 ```python
+import os
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8787/v1",
-    api_key="your-NLW_PROXY_LOCAL_TOKEN-value",
+    api_key=os.environ["NLW_PROXY_LOCAL_TOKEN"],
 )
 
-resp = client.chat.completions.create(
-    model="your-model-id",
-    messages=[{"role": "user", "content": "Hello through the proxy!"}],
+response = client.chat.completions.create(
+    model="opencode-route",
+    messages=[{"role": "user", "content": "Say hello"}],
 )
-print(resp.choices[0].message.content)
+
+print(response.choices[0].message.content)
 ```
 
-**Node.js:**
+Node.js:
 
 ```js
 import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "http://127.0.0.1:8787/v1",
-  apiKey: "your-NLW_PROXY_LOCAL_TOKEN-value",
+  apiKey: process.env.NLW_PROXY_LOCAL_TOKEN,
 });
 
-const resp = await client.chat.completions.create({
-  model: "your-model-id",
-  messages: [{ role: "user", content: "Hello through the proxy!" }],
+const response = await client.chat.completions.create({
+  model: "opencode-route",
+  messages: [{ role: "user", content: "Say hello" }],
 });
-console.log(resp.choices[0].message.content);
+
+console.log(response.choices[0].message.content);
 ```
 
-## How It Works
+## Dashboard controls
 
-Request lifecycle:
+| Key | Action |
+| --- | --- |
+| `Tab` | Move focus between the sidebar and page |
+| Arrow keys | Move through menus and tables |
+| `Enter` | Open the selected page or row |
+| `Esc` | Return to the sidebar or cancel input |
+| `/` | Search the proxy list |
+| `i` | Import a proxy file |
+| `t` | Test all proxies |
+| `f` | Freeze dashboard updates |
+| `q` | Quit |
+| `Ctrl+Shift+C` | Copy selected terminal text |
 
+The dashboard has pages for overview, models, proxies, routes, requests, logs, profiles, and settings.
+
+## Command reference
+
+```text
+nlwproxy
+nlwproxy install
+nlwproxy init
+nlwproxy config
+nlwproxy proxy
+nlwproxy route
+nlwproxy setup
+nlwproxy status
+nlwproxy serve
+nlwproxy console
+nlwproxy tui
+nlwproxy profile
+nlwproxy version
+nlwproxy help
 ```
-  ┌────────────┐       ┌───────────────────────┐       ┌──────────────────┐       ┌──────────────────┐
-  │  Client    │  ───► │  NLW Gateway :8787     │  ───► │  Healthy proxy   │  ───► │  Upstream        │
-  │ (OpenCode /│       │  (OpenAI-compatible)   │       │  (round-robin)   │       │  provider        │
-  │  Claude    │       │                        │       │                  │       │                  │
-  │  Code)     │  ◄─── │  validates local token │  ◄─── │  returns response│  ◄─── │  responds        │
-  └────────────┘       └───────────────────────┘       └──────────────────┘       └──────────────────┘
-                                  │
-                                  │  on 429 from the chosen proxy:
-                                  │  put that proxy on cooldown, pick the
-                                  └► next healthy proxy, and retry.
+
+Run `nlwproxy help` for command arguments.
+
+## Request flow
+
+```text
+OpenCode
+   |
+   v
+NLW Proxy on 127.0.0.1:8787
+   |
+   v
+healthy proxy selected by round-robin
+   |
+   v
+OpenAI-compatible provider
 ```
 
-1. Client sends an OpenAI-style request to the gateway with the local token.
-2. Gateway validates the token and picks the next healthy proxy (round-robin).
-3. Request is forwarded through that proxy to the upstream provider.
-4. On `429`, the proxy is cooled down and the request is retried on the next healthy proxy.
+When the provider returns `429`, NLW Proxy puts that route into cooldown and tries another eligible route. If every route is unavailable, the gateway returns `NO_HEALTHY_PROXY` and includes the earliest known recovery time.
 
-## Security Notes
+## Project layout
 
-- **Proxy files and local env launchers are gitignored.** `data/proxies/*.txt`, `*.local.*`, and `.nlwproxy-env.cmd` are excluded by `.gitignore` because they contain credentials.
-- **Never commit real keys.** `api_key_env` / `local_token_env` store env-var *names*; the actual secrets live only in your environment.
-- **Localhost only.** The gateway binds to `127.0.0.1` — it is not reachable from other machines on your network.
+```text
+cmd/nlwproxy/             CLI entrypoint
+internal/cli/             commands, installer, bootstrap
+internal/config/          config loading and validation
+internal/gateway/         HTTP gateway
+internal/routing/         route selection and circuit state
+internal/retry/           retry classification and Retry-After parsing
+internal/proxymanager/    proxy import, testing, and state
+internal/proxyimport/     public proxy sources and parsers
+internal/geo/             exit IP location lookup
+internal/runtime/         gateway lifecycle and hot reload
+internal/tuiapp/          Bubble Tea application
+internal/tuiapp/pages/    dashboard pages
+internal/tuiapp/ui/       shared TUI components
+examples/                 client and route examples
+docs/                     additional notes
+data/proxies/             source checkout proxy directory
+```
+
+## Development
+
+Run the same checks used by CI:
+
+```bash
+gofmt -w .
+go vet ./...
+go test ./... -count=1 -timeout 180s
+go build -trimpath ./cmd/nlwproxy
+```
+
+GitHub Actions runs tests on Windows, Linux, and macOS. It also cross-builds Windows AMD64, Linux AMD64, and macOS ARM64 binaries.
+
+## Security
+
+The gateway binds to localhost by default. Keep it that way unless you intend to expose it.
+
+Proxy files, generated profiles, local environment scripts, and build output are ignored by Git. Check `git status` before committing if you add another credential file format.
+
+NLW Proxy can only protect the path between the client and the configured upstream as well as the chosen proxy allows. Do not send sensitive traffic through an untrusted public proxy.
 
 ## Troubleshooting
 
-- **Proxies stuck "testing"** — a slow or unreachable proxy is still being probed. Give it a moment; ones that don't respond are marked dead and excluded from rotation. Re-run the test with **`t`** on the Proxies page.
-- **All proxies 429 / `NO_HEALTHY_PROXY`** — every proxy is on cooldown. The error reports the **soonest recovery** time; wait for a proxy to come off cooldown, add more proxies to `data/proxies/`, or slow your request rate.
-- **`401` / `403` from upstream** — a bad or missing key. Verify `MYPROVIDER_API_KEY` (provider key) and `NLW_PROXY_LOCAL_TOKEN` (client token) are set in the environment and that their names match `api_key_env` / `local_token_env` in `nlwproxy.json`. On Windows, remember `setx` only affects **new** terminals.
+### `nlwproxy` is not recognized
 
----
+Run the installer from the cloned repository, then open a new terminal:
 
-Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea). Run `nlwproxy help` for the full CLI reference.
+```powershell
+.\install.ps1
+```
+
+Confirm the installed command:
+
+```powershell
+Get-Command nlwproxy
+nlwproxy version
+```
+
+### Profile setup required
+
+Update to the latest version and run the installer again. Current builds create the config and profile directories on first run.
+
+### Missing provider credential
+
+The error names the environment variable it expected. Set that variable and open a new terminal.
+
+```powershell
+setx MYPROVIDER_API_KEY "your-provider-api-key"
+```
+
+### No healthy proxy
+
+Open the Proxies page and press `t`. Add another proxy file if every entry is dead or in cooldown.
+
+### Upstream returns 401 or 403
+
+Check the provider key and the provider's account permissions. These responses do not indicate a proxy health problem.
+
+### Upstream returns 429
+
+The selected route has reached a provider limit. NLW Proxy reads the retry delay when available, moves the route into cooldown, and tries the next eligible route.
+
+### Proxy test appears stuck
+
+Each test has a timeout. Wait for the current batch to finish. Proxies that do not respond are marked dead.
+
+## License
+
+No license file is included yet. Until one is added, normal copyright rules apply.
